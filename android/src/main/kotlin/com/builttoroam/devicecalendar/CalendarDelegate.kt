@@ -766,6 +766,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     putNull(Events.EXDATE)
                 } // Clear recurrence data to avoid leaving orphaned recurrence info
                 contentResolver?.update(eventsUriWithId, clearRecurrenceValues, null, null)
+                val deleteSucceeded = contentResolver?.delete(eventsUriWithId, null, null) ?: 0
                 finishWithSuccess(deleteSucceeded > 0, pendingChannelResult)
             } else {
                 if (!followingInstances!!) { // Only this instance
