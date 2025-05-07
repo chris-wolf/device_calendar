@@ -86,7 +86,6 @@ extension DayOfWeekExtension on DayOfWeek {
   }
 
   int get value => _value(this);
-
   String get enumToString => _enumToString(this);
 }
 
@@ -123,7 +122,6 @@ extension DaysOfWeekGroupExtension on DayOfWeekGroup {
   }
 
   List<DayOfWeek> get getDays => _getDays(this);
-
   String get enumToString => _enumToString(this);
 }
 
@@ -164,7 +162,6 @@ extension MonthOfYearExtension on MonthOfYear {
   }
 
   int get value => _value(this);
-
   String get enumToString => _enumToString(this);
 }
 
@@ -191,7 +188,6 @@ extension WeekNumberExtension on WeekNumber {
   }
 
   int get value => _value(this);
-
   String get enumToString => _enumToString(this);
 }
 
@@ -266,9 +262,7 @@ extension IntExtensions on int {
   }
 
   DayOfWeek get getDayOfWeekEnumValue => _getDayOfWeekEnumValue(this);
-
   MonthOfYear get getMonthOfYearEnumValue => _getMonthOfYearEnumValue(this);
-
   WeekNumber get getWeekNumberEnumValue => _getWeekNumberEnumValue(this);
 }
 

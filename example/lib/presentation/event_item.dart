@@ -39,7 +39,7 @@ class _EventItemState extends State<EventItem> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => setCurentLocation());
+    setCurentLocation();
   }
 
   @override
@@ -315,7 +315,7 @@ class _EventItemState extends State<EventItem> {
     try {
       timezone = await FlutterTimezone.getLocalTimezone();
     } catch (e) {
-      debugPrint('Could not get the local timezone');
+      print('Could not get the local timezone');
     }
     timezone ??= 'Etc/UTC';
     _currentLocation = timeZoneDatabase.locations[timezone];
