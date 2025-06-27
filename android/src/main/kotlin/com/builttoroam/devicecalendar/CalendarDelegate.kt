@@ -42,6 +42,7 @@ import org.dmfs.rfc5545.recur.RecurrenceRule as Rrule
 import android.provider.CalendarContract.Colors
 import androidx.collection.SparseArrayCompat
 import android.content.ContentProviderResult
+import android.content.ContentProviderOperation
 
 private const val RETRIEVE_CALENDARS_REQUEST_CODE = 0
 private const val RETRIEVE_EVENTS_REQUEST_CODE = RETRIEVE_CALENDARS_REQUEST_CODE + 1
