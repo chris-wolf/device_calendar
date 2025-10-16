@@ -334,6 +334,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         values.put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, calendarName)
         values.put(CalendarContract.Calendars.ACCOUNT_NAME, localAccountName)
         values.put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+        values.put(CalendarContract.Calendars.SYNC_EVENTS, 1)
         values.put(
             CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
             CalendarContract.Calendars.CAL_ACCESS_OWNER
@@ -762,32 +763,8 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             val contentResolver: ContentResolver? = _context?.contentResolver
             if (startDate == null && endDate == null && followingInstances == null) { // Delete all instances
                 val eventsUriWithId = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
-                val ops = ArrayList<ContentProviderOperation>()
-                val clearRecurrenceValues = ContentValues().apply {
-                    putNull(Events.RRULE)
-                    putNull(Events.EXRULE)
-                    putNull(Events.EXDATE)
-                } // Clear recurrence data to avoid leaving orphaned recurrence info
-                ops.add(
-                    ContentProviderOperation.newUpdate(eventsUriWithId)
-                        .withValues(clearRecurrenceValues)
-                        .build()
-                )
-                ops.add(
-                    ContentProviderOperation.newDelete(eventsUriWithId)
-                        .build()
-                )
-                try {
-                    // Apply both operations as a single atomic batch
-                    val results = contentResolver?.applyBatch(CalendarContract.AUTHORITY, ops)
-                    // The delete operation is the second one in the batch (index 1).
-                    // A successful delete will have a count of 1.
-                    val deleteSucceeded = results?.get(1)?.count ?: 0 > 0
-                    finishWithSuccess(deleteSucceeded, pendingChannelResult)
-                } catch (e: Exception) {
-                    // Handle potential exceptions from applyBatch, like OperationApplicationException
-                    finishWithError(EC.GENERIC_ERROR, e.message, pendingChannelResult)
-                }
+                val deleteSucceeded = contentResolver?.delete(eventsUriWithId, null, null) ?: 0
+                finishWithSuccess(deleteSucceeded > 0, pendingChannelResult)
             } else {
                 if (!followingInstances!!) { // Only this instance
                     val exceptionUriWithId =
