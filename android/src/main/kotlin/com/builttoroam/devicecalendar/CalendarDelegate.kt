@@ -335,6 +335,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         values.put(CalendarContract.Calendars.ACCOUNT_NAME, localAccountName)
         values.put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
         values.put(CalendarContract.Calendars.SYNC_EVENTS, 1)
+        values.put(CalendarContract.Calendars.VISIBLE, 1)
         values.put(
             CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
             CalendarContract.Calendars.CAL_ACCESS_OWNER
@@ -600,7 +601,10 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         values.put(Events.EVENT_LOCATION, event.eventLocation)
         values.put(Events.CUSTOM_APP_URI, event.eventURL)
         values.put(Events.CALENDAR_ID, calendarId)
-        values.put(Events.AVAILABILITY, getAvailability(event.availability))
+        val availability = getAvailability(event.availability)
+        if (availability != null) {
+            values.put(Events.AVAILABILITY, availability)
+        }
         var status: Int? = getEventStatus(event.eventStatus)
         if (status != null) {
             values.put(Events.STATUS, status)
@@ -761,6 +765,18 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             }
 
             val contentResolver: ContentResolver? = _context?.contentResolver
+            val buildUri = { uri: Uri ->
+                if (existingCal.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                    uri.buildUpon()
+                        .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, existingCal.accountName)
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, existingCal.accountType)
+                        .build()
+                } else {
+                    uri
+                }
+            }
+
             if (startDate == null && endDate == null && followingInstances == null) { // Delete all instances
                 val eventsUriWithId = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
                 val ops = ArrayList<ContentProviderOperation>()
@@ -770,12 +786,12 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     putNull(Events.EXDATE)
                 } // Clear recurrence data to avoid leaving orphaned recurrence info
                 ops.add(
-                    ContentProviderOperation.newUpdate(eventsUriWithId)
+                    ContentProviderOperation.newUpdate(buildUri(eventsUriWithId))
                         .withValues(clearRecurrenceValues)
                         .build()
                 )
                 ops.add(
-                    ContentProviderOperation.newDelete(eventsUriWithId)
+                    ContentProviderOperation.newDelete(buildUri(eventsUriWithId))
                         .build()
                 )
                 try {
@@ -814,7 +830,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         }
                     }
 
-                    val deleteSucceeded = contentResolver?.insert(exceptionUriWithId, values)
+                    val deleteSucceeded = contentResolver?.insert(buildUri(exceptionUriWithId), values)
                     instanceCursor.close()
                     finishWithSuccess(deleteSucceeded != null, pendingChannelResult)
                 } else { // This and following instances
@@ -876,7 +892,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                             }
 
                             values.put(Events.RRULE, newRule.toString())
-                            contentResolver?.update(eventsUriWithId, values, null, null)
+                            contentResolver?.update(buildUri(eventsUriWithId), values, null, null)
                             finishWithSuccess(true, pendingChannelResult)
                         }
                     }
