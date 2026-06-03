@@ -60,8 +60,8 @@ void main() {
         ..start = eventStart.add(const Duration(hours: 2))
         ..end = eventEnd.add(const Duration(hours: 2))
         ..recurrenceRule = RecurrenceRule(
-          RecurrenceFrequency.Daily,
-          totalOccurrences: 5,
+          frequency: Frequency.daily,
+          count: 5,
         );
 
       final createRecurringResult = await deviceCalendarPlugin.createOrUpdateEvent(recurringEvent);
