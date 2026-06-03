@@ -137,7 +137,17 @@ class DeviceCalendarPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
             CREATE_OR_UPDATE_EVENT_METHOD -> {
                 val calendarId = call.argument<String>(CALENDAR_ID_ARGUMENT)
                 val event = parseEventArgs(call, calendarId)
-                _calendarDelegate.createOrUpdateEvent(calendarId!!, event, result)
+                val instanceStartDate = call.argument<Long>("instanceStartDate")
+                val instanceEndDate = call.argument<Long>("instanceEndDate")
+                val updateFollowingInstances = call.argument<Boolean>("updateFollowingInstances")
+                _calendarDelegate.createOrUpdateEvent(
+                    calendarId!!,
+                    event,
+                    result,
+                    instanceStartDate,
+                    instanceEndDate,
+                    updateFollowingInstances
+                )
             }
             DELETE_EVENT_METHOD -> {
                 val calendarId = call.argument<String>(CALENDAR_ID_ARGUMENT)

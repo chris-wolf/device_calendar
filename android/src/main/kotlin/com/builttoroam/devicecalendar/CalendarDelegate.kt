@@ -456,7 +456,10 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
     fun createOrUpdateEvent(
         calendarId: String,
         event: Event?,
-        pendingChannelResult: MethodChannel.Result
+        pendingChannelResult: MethodChannel.Result,
+        instanceStartDate: Long? = null,
+        instanceEndDate: Long? = null,
+        updateFollowingInstances: Boolean? = null
     ) {
         if (arePermissionsGranted()) {
             if (event == null) {
@@ -480,84 +483,294 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
 
             val contentResolver: ContentResolver? = _context?.contentResolver
             val values = buildEventContentValues(event, calendarId)
+            val eventId: Long? = event.eventId?.toLongOrNull()
 
-            val exceptionHandler = CoroutineExceptionHandler { _, exception ->
-                uiThreadHandler.post {
-                    finishWithError(EC.GENERIC_ERROR, exception.message, pendingChannelResult)
-                }
-            }
-
-            val job: Job
-            var eventId: Long? = event.eventId?.toLongOrNull()
-            if (eventId == null) {
+            val buildUri = { uri: Uri ->
                 if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
-                    values.put(Events._SYNC_ID, UUID.randomUUID().toString())
-                }
-                val targetUri = if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
-                    Events.CONTENT_URI.buildUpon()
+                    uri.buildUpon()
                         .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
                         .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, calendar.accountName)
                         .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, calendar.accountType)
                         .build()
                 } else {
-                    Events.CONTENT_URI
-                }
-                val uri = contentResolver?.insert(targetUri, values)
-                // get the event ID that is the last element in the Uri
-                eventId = java.lang.Long.parseLong(uri?.lastPathSegment!!)
-                job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
-                    insertAttendees(event.attendees, eventId, contentResolver)
-                    insertReminders(event.reminders, eventId, contentResolver)
-                }
-            } else {
-                job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
-                    val targetUri = if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
-                        ContentUris.withAppendedId(Events.CONTENT_URI, eventId).buildUpon()
-                            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
-                            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, calendar.accountName)
-                            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, calendar.accountType)
-                            .build()
-                    } else {
-                        ContentUris.withAppendedId(Events.CONTENT_URI, eventId)
-                    }
-                    contentResolver?.update(
-                        targetUri,
-                        values,
-                        null,
-                        null
-                    )
-                    val existingAttendees =
-                        retrieveAttendees(calendar, eventId.toString(), contentResolver)
-                    val attendeesToDelete =
-                        if (event.attendees.isNotEmpty()) existingAttendees.filter { existingAttendee -> event.attendees.all { it.emailAddress != existingAttendee.emailAddress } } else existingAttendees
-                    for (attendeeToDelete in attendeesToDelete) {
-                        deleteAttendee(eventId, attendeeToDelete, contentResolver)
-                    }
-
-                    val attendeesToInsert =
-                        event.attendees.filter { existingAttendees.all { existingAttendee -> existingAttendee.emailAddress != it.emailAddress } }
-                    insertAttendees(attendeesToInsert, eventId, contentResolver)
-                    deleteExistingReminders(contentResolver, eventId)
-                    insertReminders(event.reminders, eventId, contentResolver!!)
-
-                    val existingSelfAttendee = existingAttendees.firstOrNull {
-                        it.emailAddress == calendar.ownerAccount
-                    }
-                    val newSelfAttendee = event.attendees.firstOrNull {
-                        it.emailAddress == calendar.ownerAccount
-                    }
-                    if (existingSelfAttendee != null && newSelfAttendee != null &&
-                        newSelfAttendee.attendanceStatus != null &&
-                        existingSelfAttendee.attendanceStatus != newSelfAttendee.attendanceStatus
-                    ) {
-                        updateAttendeeStatus(eventId, newSelfAttendee, contentResolver)
-                    }
+                    uri
                 }
             }
-            job.invokeOnCompletion { cause ->
-                if (cause == null) {
+
+            if (eventId != null && instanceStartDate != null && instanceEndDate != null && updateFollowingInstances != null) {
+                val exceptionHandler = CoroutineExceptionHandler { _, exception ->
                     uiThreadHandler.post {
-                        finishWithSuccess(eventId.toString(), pendingChannelResult)
+                        finishWithError(EC.GENERIC_ERROR, exception.message, pendingChannelResult)
+                    }
+                }
+
+                if (!updateFollowingInstances) {
+                    // --- Case 2: Edit Only This Instance ---
+                    GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                        val masterEventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventId)
+                        val masterEventCursor = contentResolver?.query(
+                            masterEventUri,
+                            arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE, Events.RRULE, Events._SYNC_ID),
+                            null, null, null
+                        )
+                        var masterStart: Long? = null
+                        var masterDuration: String? = null
+                        var masterTimezone: String? = null
+                        var masterRrule: String? = null
+                        var masterSyncId: String? = null
+                        if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
+                            masterStart = masterEventCursor.getLong(0)
+                            masterDuration = masterEventCursor.getString(1)
+                            masterTimezone = masterEventCursor.getString(2)
+                            masterRrule = masterEventCursor.getString(3)
+                            masterSyncId = masterEventCursor.getString(4)
+                            masterEventCursor.close()
+                        }
+
+                        if (masterSyncId.isNullOrEmpty() && calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                            masterSyncId = UUID.randomUUID().toString()
+                            val updateValues = ContentValues().apply {
+                                put(Events._SYNC_ID, masterSyncId)
+                            }
+                            contentResolver?.update(buildUri(masterEventUri), updateValues, null, null)
+                        }
+
+                        val exceptionValues = ContentValues().apply {
+                            putAll(values)
+                            remove(Events.CALENDAR_ID)
+                            remove(Events.RRULE)
+                        }
+
+                        exceptionValues.put(Events.ORIGINAL_INSTANCE_TIME, instanceStartDate)
+                        if (!masterSyncId.isNullOrEmpty()) {
+                            exceptionValues.put(Events.ORIGINAL_SYNC_ID, masterSyncId)
+                        }
+
+                        if (masterDuration != null) {
+                            exceptionValues.remove(Events.DTEND)
+                            val difference = event.eventEndDate!!.minus(event.eventStartDate!!)
+                            val rawDuration = difference.toDuration(DurationUnit.MILLISECONDS)
+                            var duration = ""
+                            rawDuration.toComponents { days, hours, minutes, seconds, _ ->
+                                if (days > 0 || hours > 0 || minutes > 0 || seconds > 0) duration = "P"
+                                if (days > 0) duration = duration.plus("${days}D")
+                                if (hours > 0 || minutes > 0 || seconds > 0) duration = duration.plus("T")
+                                if (hours > 0) duration = duration.plus("${hours}H")
+                                if (minutes > 0) duration = duration.plus("${minutes}M")
+                                if (seconds > 0) duration = duration.plus("${seconds}S")
+                            }
+                            exceptionValues.put(Events.DURATION, duration)
+                        } else {
+                            exceptionValues.remove(Events.DURATION)
+                            exceptionValues.put(Events.DTEND, event.eventEndDate)
+                        }
+
+                        val exceptionUriWithId = ContentUris.withAppendedId(Events.CONTENT_EXCEPTION_URI, eventId)
+                        val insertedUri = contentResolver?.insert(buildUri(exceptionUriWithId), exceptionValues)
+                        val exceptionEventId = insertedUri?.lastPathSegment?.toLongOrNull()
+
+                        if (exceptionEventId != null) {
+                            insertAttendees(event.attendees, exceptionEventId, contentResolver)
+                            insertReminders(event.reminders, exceptionEventId, contentResolver)
+
+                            val touchValues = ContentValues()
+                            if (masterStart != null) touchValues.put(Events.DTSTART, masterStart)
+                            if (masterDuration != null) touchValues.put(Events.DURATION, masterDuration)
+                            if (masterTimezone != null) touchValues.put(Events.EVENT_TIMEZONE, masterTimezone)
+                            if (masterRrule != null) touchValues.put(Events.RRULE, masterRrule)
+                            touchValues.putNull(Events.LAST_DATE)
+                            if (touchValues.size() > 0) {
+                                contentResolver?.update(buildUri(masterEventUri), touchValues, null, null)
+                            }
+
+                            uiThreadHandler.post {
+                                finishWithSuccess(exceptionEventId.toString(), pendingChannelResult)
+                            }
+                        } else {
+                            uiThreadHandler.post {
+                                finishWithError(EC.GENERIC_ERROR, "Failed to insert exception event", pendingChannelResult)
+                            }
+                        }
+                    }
+                } else {
+                    // --- Case 3: Edit This and Future Instances ---
+                    GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                        val originalEventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventId)
+                        val originalEventCursor = contentResolver?.query(
+                            originalEventUri,
+                            arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE, Events.RRULE),
+                            null, null, null
+                        )
+                        var originalStart: Long? = null
+                        var originalDuration: String? = null
+                        var originalTimezone: String? = null
+                        var originalRrule: String? = null
+                        if (originalEventCursor != null && originalEventCursor.moveToFirst()) {
+                            originalStart = originalEventCursor.getLong(0)
+                            originalDuration = originalEventCursor.getString(1)
+                            originalTimezone = originalEventCursor.getString(2)
+                            originalRrule = originalEventCursor.getString(3)
+                            originalEventCursor.close()
+                        }
+
+                        if (originalRrule != null) {
+                            val newRule = Rrule(originalRrule)
+                            val instancesCursor = CalendarContract.Instances.query(
+                                contentResolver,
+                                Cst.EVENT_INSTANCE_DELETION,
+                                originalStart ?: 0,
+                                instanceStartDate - 1
+                            )
+                            var occurrencesBeforeSplit = 0
+                            var lastRecurrenceDate: Long? = null
+                            if (instancesCursor != null) {
+                                while (instancesCursor.moveToNext()) {
+                                    if (eventId == instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
+                                        occurrencesBeforeSplit++
+                                        lastRecurrenceDate = instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_END_INDEX)
+                                    }
+                                }
+                                instancesCursor.close()
+                            }
+
+                            if (newRule.count != null && newRule.count > 0) {
+                                newRule.count = occurrencesBeforeSplit
+                            } else {
+                                if (lastRecurrenceDate != null) {
+                                    newRule.until = DateTime(lastRecurrenceDate)
+                                } else {
+                                    newRule.until = DateTime(instanceStartDate - 1)
+                                }
+                            }
+
+                            val truncateValues = ContentValues().apply {
+                                put(Events.RRULE, newRule.toString())
+                                putNull(Events.LAST_DATE)
+                                if (originalStart != null) {
+                                    put(Events.DTSTART, originalStart)
+                                }
+                                if (originalDuration != null) {
+                                    put(Events.DURATION, originalDuration)
+                                }
+                                if (originalTimezone != null) {
+                                    put(Events.EVENT_TIMEZONE, originalTimezone)
+                                }
+                            }
+                            println("LOG_REPRO_KOTLIN: updating original event $eventId via originalEventUri with new RRULE: ${newRule.toString()}")
+                            contentResolver?.update(buildUri(originalEventUri), truncateValues, null, null)
+                        }
+
+                        if (event.recurrenceRule != null && originalRrule != null) {
+                            val origRfcRule = Rrule(originalRrule)
+                            if (origRfcRule.count != null && origRfcRule.count > 0) {
+                                val instancesCursor = CalendarContract.Instances.query(
+                                    contentResolver,
+                                    Cst.EVENT_INSTANCE_DELETION,
+                                    originalStart ?: 0,
+                                    instanceStartDate - 1
+                                )
+                                var occurrencesBeforeSplit = 0
+                                if (instancesCursor != null) {
+                                    while (instancesCursor.moveToNext()) {
+                                        if (eventId == instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
+                                            occurrencesBeforeSplit++
+                                        }
+                                    }
+                                    instancesCursor.close()
+                                }
+
+                                val remainingCount = origRfcRule.count - occurrencesBeforeSplit
+                                if (remainingCount > 0) {
+                                    event.recurrenceRule!!.count = remainingCount
+                                }
+                            }
+                        }
+
+                        val newValues = buildEventContentValues(event, calendarId)
+                        if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                            newValues.put(Events._SYNC_ID, UUID.randomUUID().toString())
+                        }
+                        val targetUri = buildUri(Events.CONTENT_URI)
+                        val insertedUri = contentResolver?.insert(targetUri, newValues)
+                        val newEventId = insertedUri?.lastPathSegment?.toLongOrNull()
+
+                        if (newEventId != null) {
+                            insertAttendees(event.attendees, newEventId, contentResolver)
+                            insertReminders(event.reminders, newEventId, contentResolver)
+
+                            uiThreadHandler.post {
+                                finishWithSuccess(newEventId.toString(), pendingChannelResult)
+                            }
+                        } else {
+                            uiThreadHandler.post {
+                                finishWithError(EC.GENERIC_ERROR, "Failed to insert split event", pendingChannelResult)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // --- Case 1: Edit All Instances ---
+                val exceptionHandler = CoroutineExceptionHandler { _, exception ->
+                    uiThreadHandler.post {
+                        finishWithError(EC.GENERIC_ERROR, exception.message, pendingChannelResult)
+                    }
+                }
+
+                val job: Job
+                var eventIdNumber: Long? = eventId
+                if (eventIdNumber == null) {
+                    if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                        values.put(Events._SYNC_ID, UUID.randomUUID().toString())
+                    }
+                    val targetUri = buildUri(Events.CONTENT_URI)
+                    val uri = contentResolver?.insert(targetUri, values)
+                    eventIdNumber = java.lang.Long.parseLong(uri?.lastPathSegment!!)
+                    job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                        insertAttendees(event.attendees, eventIdNumber, contentResolver)
+                        insertReminders(event.reminders, eventIdNumber, contentResolver)
+                    }
+                } else {
+                    job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                        val targetUri = buildUri(ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber))
+                        contentResolver?.update(
+                            targetUri,
+                            values,
+                            null,
+                            null
+                        )
+                        val existingAttendees =
+                            retrieveAttendees(calendar, eventIdNumber.toString(), contentResolver)
+                        val attendeesToDelete =
+                            if (event.attendees.isNotEmpty()) existingAttendees.filter { existingAttendee -> event.attendees.all { it.emailAddress != existingAttendee.emailAddress } } else existingAttendees
+                        for (attendeeToDelete in attendeesToDelete) {
+                            deleteAttendee(eventIdNumber, attendeeToDelete, contentResolver)
+                        }
+
+                        val attendeesToInsert =
+                            event.attendees.filter { existingAttendees.all { existingAttendee -> existingAttendee.emailAddress != it.emailAddress } }
+                        insertAttendees(attendeesToInsert, eventIdNumber, contentResolver)
+                        deleteExistingReminders(contentResolver, eventIdNumber)
+                        insertReminders(event.reminders, eventIdNumber, contentResolver!!)
+
+                        val existingSelfAttendee = existingAttendees.firstOrNull {
+                            it.emailAddress == calendar.ownerAccount
+                        }
+                        val newSelfAttendee = event.attendees.firstOrNull {
+                            it.emailAddress == calendar.ownerAccount
+                        }
+                        if (existingSelfAttendee != null && newSelfAttendee != null &&
+                            newSelfAttendee.attendanceStatus != null &&
+                            existingSelfAttendee.attendanceStatus != newSelfAttendee.attendanceStatus
+                        ) {
+                            updateAttendeeStatus(eventIdNumber, newSelfAttendee, contentResolver)
+                        }
+                    }
+                }
+                job.invokeOnCompletion { cause ->
+                    if (cause == null) {
+                        uiThreadHandler.post {
+                            finishWithSuccess(eventIdNumber.toString(), pendingChannelResult)
+                        }
                     }
                 }
             }

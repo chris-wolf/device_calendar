@@ -202,7 +202,12 @@ class DeviceCalendarPlugin {
   /// it should create or update the event.
   ///
   /// Returns a [Result] with the newly created or updated [Event.eventId]
-  Future<Result<String>?> createOrUpdateEvent(Event? event) async {
+  Future<Result<String>?> createOrUpdateEvent(
+    Event? event, {
+    int? instanceStartDate,
+    int? instanceEndDate,
+    bool? updateFollowingInstances,
+  }) async {
     if (event == null) return null;
     return _invokeChannelMethod(
       ChannelConstants.methodNameCreateOrUpdateEvent,
@@ -256,7 +261,19 @@ class DeviceCalendarPlugin {
           ErrorMessages.createOrUpdateEventInvalidArgumentsMessage,
         );
       },
-      arguments: () => event.toJson(),
+      arguments: () {
+        final map = event.toJson();
+        if (instanceStartDate != null) {
+          map['instanceStartDate'] = instanceStartDate;
+        }
+        if (instanceEndDate != null) {
+          map['instanceEndDate'] = instanceEndDate;
+        }
+        if (updateFollowingInstances != null) {
+          map['updateFollowingInstances'] = updateFollowingInstances;
+        }
+        return map;
+      },
     );
   }
 
