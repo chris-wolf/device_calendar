@@ -490,7 +490,19 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             val job: Job
             var eventId: Long? = event.eventId?.toLongOrNull()
             if (eventId == null) {
-                val uri = contentResolver?.insert(Events.CONTENT_URI, values)
+                if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                    values.put(Events._SYNC_ID, UUID.randomUUID().toString())
+                }
+                val targetUri = if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                    Events.CONTENT_URI.buildUpon()
+                        .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, calendar.accountName)
+                        .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, calendar.accountType)
+                        .build()
+                } else {
+                    Events.CONTENT_URI
+                }
+                val uri = contentResolver?.insert(targetUri, values)
                 // get the event ID that is the last element in the Uri
                 eventId = java.lang.Long.parseLong(uri?.lastPathSegment!!)
                 job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
@@ -499,8 +511,17 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                 }
             } else {
                 job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                    val targetUri = if (calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                        ContentUris.withAppendedId(Events.CONTENT_URI, eventId).buildUpon()
+                            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, calendar.accountName)
+                            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_TYPE, calendar.accountType)
+                            .build()
+                    } else {
+                        ContentUris.withAppendedId(Events.CONTENT_URI, eventId)
+                    }
                     contentResolver?.update(
-                        ContentUris.withAppendedId(Events.CONTENT_URI, eventId),
+                        targetUri,
                         values,
                         null,
                         null
@@ -734,6 +755,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         endDate: Long? = null,
         followingInstances: Boolean? = null
     ) {
+        println("LOG_REPRO_KOTLIN: deleteEvent called with calendarId=$calendarId, eventId=$eventId, startDate=$startDate, endDate=$endDate, followingInstances=$followingInstances")
         if (arePermissionsGranted()) {
             val existingCal = retrieveCalendar(calendarId, pendingChannelResult, true)
             if (existingCal == null) {
@@ -744,6 +766,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                 )
                 return
             }
+            println("LOG_REPRO_KOTLIN: existingCal accountName=${existingCal.accountName}, accountType=${existingCal.accountType}")
 
             if (existingCal.isReadOnly) {
                 finishWithError(
@@ -778,6 +801,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             }
 
             if (startDate == null && endDate == null && followingInstances == null) { // Delete all instances
+                println("LOG_REPRO_KOTLIN: Delete all instances branch")
                 val eventsUriWithId = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
                 val ops = ArrayList<ContentProviderOperation>()
                 val clearRecurrenceValues = ContentValues().apply {
@@ -807,6 +831,36 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                 }
             } else {
                 if (!followingInstances!!) { // Only this instance
+                    println("LOG_REPRO_KOTLIN: Only this instance branch")
+                    val masterEventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                    val masterEventCursor = contentResolver?.query(
+                        masterEventUri,
+                        arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE, Events.RRULE, Events._SYNC_ID),
+                        null, null, null
+                    )
+                    var masterStart: Long? = null
+                    var masterDuration: String? = null
+                    var masterTimezone: String? = null
+                    var masterRrule: String? = null
+                    var masterSyncId: String? = null
+                    if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
+                        masterStart = masterEventCursor.getLong(0)
+                        masterDuration = masterEventCursor.getString(1)
+                        masterTimezone = masterEventCursor.getString(2)
+                        masterRrule = masterEventCursor.getString(3)
+                        masterSyncId = masterEventCursor.getString(4)
+                        masterEventCursor.close()
+                    }
+
+                    if (masterSyncId.isNullOrEmpty() && existingCal.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
+                        masterSyncId = UUID.randomUUID().toString()
+                        val updateValues = ContentValues().apply {
+                            put(Events._SYNC_ID, masterSyncId)
+                        }
+                        contentResolver?.update(buildUri(masterEventUri), updateValues, null, null)
+                        println("LOG_REPRO_KOTLIN: Updated master event $eventIdNumber with generated _sync_id: $masterSyncId")
+                    }
+
                     val exceptionUriWithId =
                         ContentUris.withAppendedId(Events.CONTENT_EXCEPTION_URI, eventIdNumber)
                     val values = ContentValues()
@@ -816,24 +870,68 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         startDate!!,
                         endDate!!
                     )
+                    println("LOG_REPRO_KOTLIN: instanceCursor size: ${instanceCursor.count}")
 
                     while (instanceCursor.moveToNext()) {
                         val foundEventID =
                             instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)
+                        println("LOG_REPRO_KOTLIN: foundEventID=$foundEventID, eventIdNumber=$eventIdNumber")
 
                         if (eventIdNumber == foundEventID) {
-                            values.put(
-                                Events.ORIGINAL_INSTANCE_TIME,
-                                instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_BEGIN_INDEX)
-                            )
+                            val instanceBegin = instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_BEGIN_INDEX)
+                            val instanceEnd = instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_END_INDEX)
+                            values.put(Events.ORIGINAL_INSTANCE_TIME, instanceBegin)
                             values.put(Events.STATUS, Events.STATUS_CANCELED)
+                            values.put(Events.DTSTART, instanceBegin)
+                            if (!masterSyncId.isNullOrEmpty()) {
+                                values.put(Events.ORIGINAL_SYNC_ID, masterSyncId)
+                            }
+                            if (masterDuration != null) {
+                                values.put(Events.DURATION, masterDuration)
+                            } else {
+                                values.put(Events.DTEND, instanceEnd)
+                            }
+                            if (masterTimezone != null) {
+                                values.put(Events.EVENT_TIMEZONE, masterTimezone)
+                            } else {
+                                values.put(Events.EVENT_TIMEZONE, "UTC")
+                            }
                         }
                     }
 
-                    val deleteSucceeded = contentResolver?.insert(buildUri(exceptionUriWithId), values)
+                    val targetUri = buildUri(exceptionUriWithId)
+                    println("LOG_REPRO_KOTLIN: inserting exception to $targetUri with values: $values")
+                    val deleteSucceeded = contentResolver?.insert(targetUri, values)
+                    println("LOG_REPRO_KOTLIN: deleteSucceeded result: $deleteSucceeded")
+
                     instanceCursor.close()
+
+                    if (deleteSucceeded != null) {
+                        // For local account calendars (SYNC_EVENTS = 0), we must perform a safe "touch" update
+                        // on the master event to force the Calendar Provider to re-expand the virtual instances.
+                        // We must explicitly include the RRULE in the update values to trigger the recalculation.
+                        val touchValues = ContentValues()
+                        if (masterStart != null) {
+                            touchValues.put(Events.DTSTART, masterStart)
+                        }
+                        if (masterDuration != null) {
+                            touchValues.put(Events.DURATION, masterDuration)
+                        }
+                        if (masterTimezone != null) {
+                            touchValues.put(Events.EVENT_TIMEZONE, masterTimezone)
+                        }
+                        if (masterRrule != null) {
+                            touchValues.put(Events.RRULE, masterRrule)
+                        }
+                        touchValues.putNull(Events.LAST_DATE) // Clear LAST_DATE to force recalculation of the recurrence
+                        if (touchValues.size() > 0) {
+                            println("LOG_REPRO_KOTLIN: performing touch update on master event $eventIdNumber AFTER exception insertion")
+                            contentResolver?.update(buildUri(masterEventUri), touchValues, null, null)
+                        }
+                    }
                     finishWithSuccess(deleteSucceeded != null, pendingChannelResult)
                 } else { // This and following instances
+                    println("LOG_REPRO_KOTLIN: This and following instances branch")
                     val eventsUriWithId =
                         ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
                     val values = ContentValues()
@@ -843,18 +941,22 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         startDate!!,
                         endDate!!
                     )
+                    println("LOG_REPRO_KOTLIN: instanceCursor size: ${instanceCursor.count}")
 
                     while (instanceCursor.moveToNext()) {
                         val foundEventID =
                             instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)
+                        println("LOG_REPRO_KOTLIN: foundEventID=$foundEventID, eventIdNumber=$eventIdNumber")
 
                         if (eventIdNumber == foundEventID) {
                             val newRule =
                                 Rrule(instanceCursor.getString(Cst.EVENT_INSTANCE_DELETION_RRULE_INDEX))
                             val lastDate =
                                 instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_LAST_DATE_INDEX)
+                            println("LOG_REPRO_KOTLIN: newRule=$newRule, lastDate=$lastDate")
 
                             if (lastDate > 0 && newRule.count != null && newRule.count > 0) { // Update occurrence rule
+                                println("LOG_REPRO_KOTLIN: Update occurrence rule branch")
                                 val cursor = CalendarContract.Instances.query(
                                     contentResolver,
                                     Cst.EVENT_INSTANCE_DELETION,
@@ -868,6 +970,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                                 }
                                 cursor.close()
                             } else { // Indefinite and specified date rule
+                                println("LOG_REPRO_KOTLIN: Indefinite and specified date rule branch")
                                 val cursor = CalendarContract.Instances.query(
                                     contentResolver,
                                     Cst.EVENT_INSTANCE_DELETION,
@@ -891,8 +994,26 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                                 cursor.close()
                             }
 
+                            println("LOG_REPRO_KOTLIN: updated newRule: $newRule")
                             values.put(Events.RRULE, newRule.toString())
-                            contentResolver?.update(buildUri(eventsUriWithId), values, null, null)
+                            values.putNull(Events.LAST_DATE)
+                            
+                            val eventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                            val eventCursor = contentResolver?.query(
+                                eventUri,
+                                arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE),
+                                null, null, null
+                            )
+                            if (eventCursor != null && eventCursor.moveToFirst()) {
+                                values.put(Events.DTSTART, eventCursor.getLong(0))
+                                values.put(Events.DURATION, eventCursor.getString(1))
+                                values.put(Events.EVENT_TIMEZONE, eventCursor.getString(2))
+                                eventCursor.close()
+                            }
+
+                            val targetUri = eventsUriWithId
+                            println("LOG_REPRO_KOTLIN: updating event $eventIdNumber via $targetUri with values: $values")
+                            contentResolver?.update(targetUri, values, null, null)
                             finishWithSuccess(true, pendingChannelResult)
                         }
                     }
