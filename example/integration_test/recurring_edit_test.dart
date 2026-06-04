@@ -241,5 +241,103 @@ void main() {
 
       print('LOG_REPRO: [Test 3] Passed');
     });
+
+    test('4. Edit This and Future Instances Twice', () async {
+      final localLocation = tz.local;
+      final now = tz.TZDateTime.now(localLocation);
+      // Offset by 30 days to keep events separated
+      final eventStart = tz.TZDateTime(localLocation, now.year, now.month, now.day, 10, 0, 0).add(const Duration(days: 30));
+
+      final eventId = await createDailyRecurringEvent(eventStart, 5);
+      print('LOG_REPRO: [Test 4] Created event: $eventId');
+
+      final retrieveParams = RetrieveEventsParams(
+        startDate: eventStart.subtract(const Duration(days: 1)),
+        endDate: eventStart.add(const Duration(days: 7)),
+      );
+
+      // Verify 5 instances initially
+      final initialEventsResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(initialEventsResult.isSuccess, true);
+      final initialEvents = initialEventsResult.data!.where((e) => e.eventId == eventId).toList();
+      expect(initialEvents.length, 5);
+
+      // Sort by start date ascending
+      initialEvents.sort((a, b) => a.start!.compareTo(b.start!));
+
+      // Choose 3rd instance (index 2)
+      final targetInstance = initialEvents[2];
+      final targetStart = targetInstance.start!.millisecondsSinceEpoch;
+      final targetEnd = targetInstance.end!.millisecondsSinceEpoch;
+
+      print('LOG_REPRO: [Test 4] Target instance 1 start: ${targetInstance.start}');
+
+      // Create updated event object for target instance
+      final updatedEvent = targetInstance;
+      updatedEvent.title = 'Updated Title - First Split';
+
+      print('LOG_REPRO: [Test 4] Editing this and future instances (first split)');
+      final editResult = await deviceCalendarPlugin.createOrUpdateEvent(
+        updatedEvent,
+        instanceStartDate: targetStart,
+        instanceEndDate: targetEnd,
+        updateFollowingInstances: true,
+      );
+      expect(editResult?.isSuccess, true);
+      final newSeriesEventId = editResult!.data!;
+      print('LOG_REPRO: [Test 4] Created new split series with ID: $newSeriesEventId');
+
+      // Wait for Android Calendar Provider background triggers to process the split and re-expand instances
+      await Future.delayed(const Duration(seconds: 2));
+
+      // Verify instances after edit
+      final afterFirstEditResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(afterFirstEditResult.isSuccess, true);
+
+      final originalSeriesEvents = afterFirstEditResult.data!.where((e) => e.eventId == eventId).toList();
+      final newSeriesEvents = afterFirstEditResult.data!.where((e) => e.eventId == newSeriesEventId).toList();
+
+      expect(originalSeriesEvents.length, 2);
+      expect(newSeriesEvents.length, 3);
+
+      newSeriesEvents.sort((a, b) => a.start!.compareTo(b.start!));
+
+      // Choose the first instance of the new series (which is on the same day as the targetStart)
+      final targetInstance2 = newSeriesEvents.first;
+      final targetStart2 = targetInstance2.start!.millisecondsSinceEpoch;
+      final targetEnd2 = targetInstance2.end!.millisecondsSinceEpoch;
+
+      print('LOG_REPRO: [Test 4] Target instance 2 start: ${targetInstance2.start}');
+
+      final updatedEvent2 = targetInstance2;
+      updatedEvent2.title = 'Updated Title - Second Split';
+
+      print('LOG_REPRO: [Test 4] Editing this and future instances (second split)');
+      final editResult2 = await deviceCalendarPlugin.createOrUpdateEvent(
+        updatedEvent2,
+        instanceStartDate: targetStart2,
+        instanceEndDate: targetEnd2,
+        updateFollowingInstances: true,
+      );
+      expect(editResult2?.isSuccess, true);
+      final thirdSeriesEventId = editResult2!.data!;
+      print('LOG_REPRO: [Test 4] Created third split series with ID: $thirdSeriesEventId');
+
+      // Wait for Android Calendar Provider
+      await Future.delayed(const Duration(seconds: 2));
+
+      // Verify final instances
+      final finalResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(finalResult.isSuccess, true);
+
+      print('LOG_REPRO: All final events found:');
+      for (final event in finalResult.data!) {
+        if (event.eventId == eventId || event.eventId == newSeriesEventId || event.eventId == thirdSeriesEventId) {
+          print('  - ID: ${event.eventId}, Start: ${event.start}, Title: ${event.title}, Recur: ${event.recurrenceRule}');
+        }
+      }
+
+      print('LOG_REPRO: [Test 4] Completed');
+    });
   });
 }

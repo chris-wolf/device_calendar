@@ -651,32 +651,37 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                             }
                         }
 
-                        // Truncate the original event's RRULE
-                        if (newRule.count != null && newRule.count > 0) {
-                            newRule.count = occurrencesBeforeSplit
+                        if (occurrencesBeforeSplit == 0) {
+                            println("LOG_REPRO_KOTLIN: occurrencesBeforeSplit is 0, deleting original event $eventId")
+                            contentResolver?.delete(buildUri(originalEventUri), null, null)
                         } else {
-                            if (lastRecurrenceBeginDate != null) {
-                                newRule.until = DateTime(lastRecurrenceBeginDate)
+                            // Truncate the original event's RRULE
+                            if (newRule.count != null && newRule.count > 0) {
+                                newRule.count = occurrencesBeforeSplit
                             } else {
-                                newRule.until = DateTime(instanceStartDate - 1)
+                                if (lastRecurrenceBeginDate != null) {
+                                    newRule.until = DateTime(lastRecurrenceBeginDate)
+                                } else {
+                                    newRule.until = DateTime(instanceStartDate - 1)
+                                }
                             }
-                        }
 
-                        val truncateValues = ContentValues().apply {
-                            put(Events.RRULE, newRule.toString())
-                            putNull(Events.LAST_DATE)
-                            if (originalStart != null) {
-                                put(Events.DTSTART, originalStart)
+                            val truncateValues = ContentValues().apply {
+                                put(Events.RRULE, newRule.toString())
+                                putNull(Events.LAST_DATE)
+                                if (originalStart != null) {
+                                    put(Events.DTSTART, originalStart)
+                                }
+                                if (originalDuration != null) {
+                                    put(Events.DURATION, originalDuration)
+                                }
+                                if (originalTimezone != null) {
+                                    put(Events.EVENT_TIMEZONE, originalTimezone)
+                                }
                             }
-                            if (originalDuration != null) {
-                                put(Events.DURATION, originalDuration)
-                            }
-                            if (originalTimezone != null) {
-                                put(Events.EVENT_TIMEZONE, originalTimezone)
-                            }
+                            println("LOG_REPRO_KOTLIN: updating original event $eventId via originalEventUri with new RRULE: ${newRule.toString()}")
+                            contentResolver?.update(buildUri(originalEventUri), truncateValues, null, null)
                         }
-                        println("LOG_REPRO_KOTLIN: updating original event $eventId via originalEventUri with new RRULE: ${newRule.toString()}")
-                        contentResolver?.update(buildUri(originalEventUri), truncateValues, null, null)
 
                         // Adjust the new split event's COUNT using the pre-computed occurrencesBeforeSplit
                         if (event.recurrenceRule != null) {
@@ -1204,33 +1209,37 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
 
                                 if (lastRecurrenceDate != null) {
                                     newRule.until = DateTime(lastRecurrenceDate)
+                                    cursor.close()
+
+                                    println("LOG_REPRO_KOTLIN: updated newRule: $newRule")
+                                    values.put(Events.RRULE, newRule.toString())
+                                    values.putNull(Events.LAST_DATE)
+
+                                    val eventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                                    val eventCursor = contentResolver?.query(
+                                        eventUri,
+                                        arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE),
+                                        null, null, null
+                                    )
+                                    if (eventCursor != null && eventCursor.moveToFirst()) {
+                                        values.put(Events.DTSTART, eventCursor.getLong(0))
+                                        values.put(Events.DURATION, eventCursor.getString(1))
+                                        values.put(Events.EVENT_TIMEZONE, eventCursor.getString(2))
+                                        eventCursor.close()
+                                    }
+
+                                    val targetUri = eventsUriWithId
+                                    println("LOG_REPRO_KOTLIN: updating event $eventIdNumber via $targetUri with values: $values")
+                                    contentResolver?.update(targetUri, values, null, null)
+                                    finishWithSuccess(true, pendingChannelResult)
                                 } else {
-                                    newRule.until = DateTime(startDate - 1)
+                                    cursor.close()
+                                    println("LOG_REPRO_KOTLIN: deleting event $eventIdNumber because all occurrences are deleted")
+                                    val targetUri = eventsUriWithId
+                                    contentResolver?.delete(targetUri, null, null)
+                                    finishWithSuccess(true, pendingChannelResult)
                                 }
-                                cursor.close()
                             }
-
-                            println("LOG_REPRO_KOTLIN: updated newRule: $newRule")
-                            values.put(Events.RRULE, newRule.toString())
-                            values.putNull(Events.LAST_DATE)
-                            
-                            val eventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
-                            val eventCursor = contentResolver?.query(
-                                eventUri,
-                                arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE),
-                                null, null, null
-                            )
-                            if (eventCursor != null && eventCursor.moveToFirst()) {
-                                values.put(Events.DTSTART, eventCursor.getLong(0))
-                                values.put(Events.DURATION, eventCursor.getString(1))
-                                values.put(Events.EVENT_TIMEZONE, eventCursor.getString(2))
-                                eventCursor.close()
-                            }
-
-                            val targetUri = eventsUriWithId
-                            println("LOG_REPRO_KOTLIN: updating event $eventIdNumber via $targetUri with values: $values")
-                            contentResolver?.update(targetUri, values, null, null)
-                            finishWithSuccess(true, pendingChannelResult)
                         }
                     }
                     instanceCursor.close()
