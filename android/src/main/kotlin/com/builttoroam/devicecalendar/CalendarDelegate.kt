@@ -518,13 +518,16 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         var masterTimezone: String? = null
                         var masterRrule: String? = null
                         var masterSyncId: String? = null
-                        if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
-                            masterStart = masterEventCursor.getLong(0)
-                            masterDuration = masterEventCursor.getString(1)
-                            masterTimezone = masterEventCursor.getString(2)
-                            masterRrule = masterEventCursor.getString(3)
-                            masterSyncId = masterEventCursor.getString(4)
-                            masterEventCursor.close()
+                        try {
+                            if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
+                                masterStart = masterEventCursor.getLong(0)
+                                masterDuration = masterEventCursor.getString(1)
+                                masterTimezone = masterEventCursor.getString(2)
+                                masterRrule = masterEventCursor.getString(3)
+                                masterSyncId = masterEventCursor.getString(4)
+                            }
+                        } finally {
+                            masterEventCursor?.close()
                         }
 
                         if (masterSyncId.isNullOrEmpty() && calendar.accountType == CalendarContract.ACCOUNT_TYPE_LOCAL) {
@@ -550,14 +553,16 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                             exceptionValues.remove(Events.DTEND)
                             val difference = event.eventEndDate!!.minus(event.eventStartDate!!)
                             val rawDuration = difference.toDuration(DurationUnit.MILLISECONDS)
-                            var duration = ""
+                            var duration = "P0D"
                             rawDuration.toComponents { days, hours, minutes, seconds, _ ->
-                                if (days > 0 || hours > 0 || minutes > 0 || seconds > 0) duration = "P"
-                                if (days > 0) duration = duration.plus("${days}D")
-                                if (hours > 0 || minutes > 0 || seconds > 0) duration = duration.plus("T")
-                                if (hours > 0) duration = duration.plus("${hours}H")
-                                if (minutes > 0) duration = duration.plus("${minutes}M")
-                                if (seconds > 0) duration = duration.plus("${seconds}S")
+                                if (days > 0 || hours > 0 || minutes > 0 || seconds > 0) {
+                                    duration = "P"
+                                    if (days > 0) duration = duration.plus("${days}D")
+                                    if (hours > 0 || minutes > 0 || seconds > 0) duration = duration.plus("T")
+                                    if (hours > 0) duration = duration.plus("${hours}H")
+                                    if (minutes > 0) duration = duration.plus("${minutes}M")
+                                    if (seconds > 0) duration = duration.plus("${seconds}S")
+                                }
                             }
                             exceptionValues.put(Events.DURATION, duration)
                         } else {
@@ -605,80 +610,78 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         var originalDuration: String? = null
                         var originalTimezone: String? = null
                         var originalRrule: String? = null
-                        if (originalEventCursor != null && originalEventCursor.moveToFirst()) {
-                            originalStart = originalEventCursor.getLong(0)
-                            originalDuration = originalEventCursor.getString(1)
-                            originalTimezone = originalEventCursor.getString(2)
-                            originalRrule = originalEventCursor.getString(3)
-                            originalEventCursor.close()
+                        try {
+                            if (originalEventCursor != null && originalEventCursor.moveToFirst()) {
+                                originalStart = originalEventCursor.getLong(0)
+                                originalDuration = originalEventCursor.getString(1)
+                                originalTimezone = originalEventCursor.getString(2)
+                                originalRrule = originalEventCursor.getString(3)
+                            }
+                        } finally {
+                            originalEventCursor?.close()
                         }
 
-                        if (originalRrule != null) {
-                            val newRule = Rrule(originalRrule)
-                            val instancesCursor = CalendarContract.Instances.query(
-                                contentResolver,
-                                Cst.EVENT_INSTANCE_DELETION,
-                                originalStart ?: 0,
-                                instanceStartDate - 1
-                            )
-                            var occurrencesBeforeSplit = 0
-                            var lastRecurrenceDate: Long? = null
-                            if (instancesCursor != null) {
+                        if (originalRrule == null) {
+                            uiThreadHandler.post {
+                                finishWithError(EC.GENERIC_ERROR, "Cannot split a non-recurring event", pendingChannelResult)
+                            }
+                            return@launch
+                        }
+
+                        // Query instances ONCE before modifying the original RRULE to avoid race conditions
+                        val newRule = Rrule(originalRrule)
+                        val instancesCursor = CalendarContract.Instances.query(
+                            contentResolver,
+                            Cst.EVENT_INSTANCE_DELETION,
+                            originalStart ?: 0,
+                            instanceStartDate - 1
+                        )
+                        var occurrencesBeforeSplit = 0
+                        var lastRecurrenceBeginDate: Long? = null
+                        if (instancesCursor != null) {
+                            try {
                                 while (instancesCursor.moveToNext()) {
                                     if (eventId == instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
                                         occurrencesBeforeSplit++
-                                        lastRecurrenceDate = instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_END_INDEX)
+                                        lastRecurrenceBeginDate = instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_BEGIN_INDEX)
                                     }
                                 }
+                            } finally {
                                 instancesCursor.close()
                             }
-
-                            if (newRule.count != null && newRule.count > 0) {
-                                newRule.count = occurrencesBeforeSplit
-                            } else {
-                                if (lastRecurrenceDate != null) {
-                                    newRule.until = DateTime(lastRecurrenceDate)
-                                } else {
-                                    newRule.until = DateTime(instanceStartDate - 1)
-                                }
-                            }
-
-                            val truncateValues = ContentValues().apply {
-                                put(Events.RRULE, newRule.toString())
-                                putNull(Events.LAST_DATE)
-                                if (originalStart != null) {
-                                    put(Events.DTSTART, originalStart)
-                                }
-                                if (originalDuration != null) {
-                                    put(Events.DURATION, originalDuration)
-                                }
-                                if (originalTimezone != null) {
-                                    put(Events.EVENT_TIMEZONE, originalTimezone)
-                                }
-                            }
-                            println("LOG_REPRO_KOTLIN: updating original event $eventId via originalEventUri with new RRULE: ${newRule.toString()}")
-                            contentResolver?.update(buildUri(originalEventUri), truncateValues, null, null)
                         }
 
-                        if (event.recurrenceRule != null && originalRrule != null) {
+                        // Truncate the original event's RRULE
+                        if (newRule.count != null && newRule.count > 0) {
+                            newRule.count = occurrencesBeforeSplit
+                        } else {
+                            if (lastRecurrenceBeginDate != null) {
+                                newRule.until = DateTime(lastRecurrenceBeginDate)
+                            } else {
+                                newRule.until = DateTime(instanceStartDate - 1)
+                            }
+                        }
+
+                        val truncateValues = ContentValues().apply {
+                            put(Events.RRULE, newRule.toString())
+                            putNull(Events.LAST_DATE)
+                            if (originalStart != null) {
+                                put(Events.DTSTART, originalStart)
+                            }
+                            if (originalDuration != null) {
+                                put(Events.DURATION, originalDuration)
+                            }
+                            if (originalTimezone != null) {
+                                put(Events.EVENT_TIMEZONE, originalTimezone)
+                            }
+                        }
+                        println("LOG_REPRO_KOTLIN: updating original event $eventId via originalEventUri with new RRULE: ${newRule.toString()}")
+                        contentResolver?.update(buildUri(originalEventUri), truncateValues, null, null)
+
+                        // Adjust the new split event's COUNT using the pre-computed occurrencesBeforeSplit
+                        if (event.recurrenceRule != null) {
                             val origRfcRule = Rrule(originalRrule)
                             if (origRfcRule.count != null && origRfcRule.count > 0) {
-                                val instancesCursor = CalendarContract.Instances.query(
-                                    contentResolver,
-                                    Cst.EVENT_INSTANCE_DELETION,
-                                    originalStart ?: 0,
-                                    instanceStartDate - 1
-                                )
-                                var occurrencesBeforeSplit = 0
-                                if (instancesCursor != null) {
-                                    while (instancesCursor.moveToNext()) {
-                                        if (eventId == instancesCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
-                                            occurrencesBeforeSplit++
-                                        }
-                                    }
-                                    instancesCursor.close()
-                                }
-
                                 val remainingCount = origRfcRule.count - occurrencesBeforeSplit
                                 if (remainingCount > 0) {
                                     event.recurrenceRule!!.count = remainingCount
