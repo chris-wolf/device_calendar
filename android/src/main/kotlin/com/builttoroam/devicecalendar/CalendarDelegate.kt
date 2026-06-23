@@ -542,6 +542,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                             putAll(values)
                             remove(Events.CALENDAR_ID)
                             remove(Events.RRULE)
+                            remove(Events.EVENT_COLOR_KEY)
                         }
 
                         exceptionValues.put(Events.ORIGINAL_INSTANCE_TIME, instanceStartDate)
@@ -575,6 +576,14 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                         val exceptionEventId = insertedUri?.lastPathSegment?.toLongOrNull()
 
                         if (exceptionEventId != null) {
+                            if (event.eventColorKey != null) {
+                                val colorValues = ContentValues().apply {
+                                    put(Events.EVENT_COLOR_KEY, event.eventColorKey)
+                                }
+                                val exceptionEventUri = ContentUris.withAppendedId(Events.CONTENT_URI, exceptionEventId)
+                                contentResolver?.update(buildUri(exceptionEventUri), colorValues, null, null)
+                            }
+
                             insertAttendees(event.attendees, exceptionEventId, contentResolver)
                             insertReminders(event.reminders, exceptionEventId, contentResolver)
 
