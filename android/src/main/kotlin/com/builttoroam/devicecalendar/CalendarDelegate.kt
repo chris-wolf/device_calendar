@@ -748,38 +748,41 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     }
                 } else {
                     job = GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
-                        // Read the master event's original DTSTART to preserve the series start date.
-                        // Without this, the instance date (e.g., Feb 4) would overwrite the series
-                        // start (e.g., Jan 1), causing all instances before Feb 4 to disappear.
-                        val masterUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
-                        val masterCursor = contentResolver?.query(
-                            masterUri,
-                            arrayOf(Events.DTSTART),
-                            null, null, null
-                        )
-                        try {
-                            if (masterCursor != null && masterCursor.moveToFirst()) {
-                                val originalDtStart = masterCursor.getLong(0)
-                                if (event.eventAllDay) {
-                                    // All-day: preserve original DTSTART as-is (midnight UTC)
-                                    values.put(Events.DTSTART, originalDtStart)
-                                } else {
-                                    // Timed event: preserve the original DATE, apply user's TIME-OF-DAY
-                                    val originalCal = java.util.Calendar.getInstance().apply {
-                                        timeInMillis = originalDtStart
+                        // For recurring events, preserve the series' original DTSTART to avoid
+                        // overwriting it with an instance date (e.g., editing the Feb 4 instance
+                        // should not change the series start from Jan 1 to Feb 4).
+                        // For non-recurring events, the user-provided start date is used as-is.
+                        if (event.recurrenceRule != null) {
+                            val masterUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                            val masterCursor = contentResolver?.query(
+                                masterUri,
+                                arrayOf(Events.DTSTART),
+                                null, null, null
+                            )
+                            try {
+                                if (masterCursor != null && masterCursor.moveToFirst()) {
+                                    val originalDtStart = masterCursor.getLong(0)
+                                    if (event.eventAllDay) {
+                                        // All-day: preserve original DTSTART as-is (midnight UTC)
+                                        values.put(Events.DTSTART, originalDtStart)
+                                    } else {
+                                        // Timed event: preserve the original DATE, apply user's TIME-OF-DAY
+                                        val originalCal = java.util.Calendar.getInstance().apply {
+                                            timeInMillis = originalDtStart
+                                        }
+                                        val userCal = java.util.Calendar.getInstance().apply {
+                                            timeInMillis = event.eventStartDate!!
+                                        }
+                                        originalCal.set(java.util.Calendar.HOUR_OF_DAY, userCal.get(java.util.Calendar.HOUR_OF_DAY))
+                                        originalCal.set(java.util.Calendar.MINUTE, userCal.get(java.util.Calendar.MINUTE))
+                                        originalCal.set(java.util.Calendar.SECOND, userCal.get(java.util.Calendar.SECOND))
+                                        originalCal.set(java.util.Calendar.MILLISECOND, userCal.get(java.util.Calendar.MILLISECOND))
+                                        values.put(Events.DTSTART, originalCal.timeInMillis)
                                     }
-                                    val userCal = java.util.Calendar.getInstance().apply {
-                                        timeInMillis = event.eventStartDate!!
-                                    }
-                                    originalCal.set(java.util.Calendar.HOUR_OF_DAY, userCal.get(java.util.Calendar.HOUR_OF_DAY))
-                                    originalCal.set(java.util.Calendar.MINUTE, userCal.get(java.util.Calendar.MINUTE))
-                                    originalCal.set(java.util.Calendar.SECOND, userCal.get(java.util.Calendar.SECOND))
-                                    originalCal.set(java.util.Calendar.MILLISECOND, userCal.get(java.util.Calendar.MILLISECOND))
-                                    values.put(Events.DTSTART, originalCal.timeInMillis)
                                 }
+                            } finally {
+                                masterCursor?.close()
                             }
-                        } finally {
-                            masterCursor?.close()
                         }
 
                         val targetUri = buildUri(ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber))
