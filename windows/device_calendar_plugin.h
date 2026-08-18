@@ -13,7 +13,7 @@ class DeviceCalendarPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(flutter::PluginRegistrarWindows *registrar);
 
-  DeviceCalendarPlugin();
+  DeviceCalendarPlugin(std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel = nullptr);
 
   virtual ~DeviceCalendarPlugin();
 
@@ -60,6 +60,8 @@ class DeviceCalendarPlugin : public flutter::Plugin {
   winrt::fire_and_forget DeleteEventInstance(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
 };
 
 }  // namespace device_calendar

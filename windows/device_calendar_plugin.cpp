@@ -187,19 +187,97 @@ std::string GetStringValue(const flutter::EncodableMap& map, const std::string& 
 
 // Request AppointmentStore (tries AllCalendarsReadWrite then falls back to AppCalendarsReadWrite)
 IAsyncOperation<AppointmentStore> GetAppointmentStore() {
+  AppointmentStore store{nullptr};
+  bool fallback = false;
   try {
-    auto store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AllCalendarsReadWrite);
-    if (store) {
-      co_return store;
+    store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AllCalendarsReadWrite);
+  } catch (...) {
+    fallback = true;
+  }
+  if (fallback || !store) {
+    try {
+      store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AppCalendarsReadWrite);
+    } catch (...) {
+      store = nullptr;
     }
-  } catch (...) {
   }
+  co_return store;
+}
+
+// Safe Calendar Property Accessors
+inline std::string SafeGetCalendarId(const AppointmentCalendar& cal) {
+  try { return winrt::to_string(cal.LocalId()); } catch (...) { return ""; }
+}
+inline std::string SafeGetCalendarName(const AppointmentCalendar& cal) {
+  try { return winrt::to_string(cal.DisplayName()); } catch (...) { return ""; }
+}
+inline bool SafeGetCalendarIsReadOnly(const AppointmentCalendar& cal) {
+  try { return !cal.CanCreateOrUpdateAppointments(); } catch (...) { return false; }
+}
+inline bool SafeGetCalendarIsDefault(const AppointmentCalendar& cal) {
+  try { return !cal.IsHidden(); } catch (...) { return true; }
+}
+inline int64_t SafeGetCalendarColor(const AppointmentCalendar& cal) {
+  try { return ColorToArgb(cal.DisplayColor()); } catch (...) { return 0xFFFF0000; }
+}
+inline std::string SafeGetCalendarAccountName(const AppointmentCalendar& cal) {
+  try { return winrt::to_string(cal.SourceDisplayName()); } catch (...) { return ""; }
+}
+inline std::string SafeGetCalendarAccountType(const AppointmentCalendar& cal) {
   try {
-    auto store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AppCalendarsReadWrite);
-    co_return store;
+    std::string type = winrt::to_string(cal.UserDataAccountId());
+    return type.empty() ? "Local" : type;
   } catch (...) {
-    co_return nullptr;
+    return "Local";
   }
+}
+
+// Safe Appointment Property Accessors
+inline std::string SafeGetEventId(const Appointment& app) {
+  try {
+    std::string id = winrt::to_string(app.LocalId());
+    if (id.empty()) id = winrt::to_string(app.RoamingId());
+    return id;
+  } catch (...) {
+    return "";
+  }
+}
+inline std::string SafeGetEventTitle(const Appointment& app) {
+  try { return winrt::to_string(app.Subject()); } catch (...) { return ""; }
+}
+inline std::string SafeGetEventDescription(const Appointment& app) {
+  try { return winrt::to_string(app.Details()); } catch (...) { return ""; }
+}
+inline int64_t SafeGetEventStartTime(const Appointment& app) {
+  try { return DateTimeToEpochMillis(app.StartTime()); } catch (...) { return 0; }
+}
+inline int64_t SafeGetEventEndTime(const Appointment& app) {
+  try { return DateTimeToEpochMillis(app.StartTime() + app.Duration()); } catch (...) { return 0; }
+}
+inline bool SafeGetEventAllDay(const Appointment& app) {
+  try { return app.AllDay(); } catch (...) { return false; }
+}
+inline std::string SafeGetEventLocation(const Appointment& app) {
+  try { return winrt::to_string(app.Location()); } catch (...) { return ""; }
+}
+inline std::string SafeGetEventUrl(const Appointment& app) {
+  try {
+    auto uri = app.Uri();
+    if (uri) return winrt::to_string(uri.RawUri());
+  } catch (...) {}
+  return "";
+}
+inline std::string SafeGetEventAvailability(const Appointment& app) {
+  try {
+    switch (app.BusyStatus()) {
+      case AppointmentBusyStatus::Free: return "FREE";
+      case AppointmentBusyStatus::Tentative: return "TENTATIVE";
+      case AppointmentBusyStatus::Busy: return "BUSY";
+      case AppointmentBusyStatus::OutOfOffice:
+      case AppointmentBusyStatus::WorkingElsewhere: return "UNAVAILABLE";
+    }
+  } catch (...) {}
+  return "BUSY";
 }
 
 }  // namespace
@@ -210,13 +288,17 @@ IAsyncOperation<AppointmentStore> GetAppointmentStore() {
 
 // static
 void DeviceCalendarPlugin::RegisterWithRegistrar(flutter::PluginRegistrarWindows *registrar) {
+  try {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+  } catch (...) {}
+
   auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       registrar->messenger(), "plugins.builttoroam.com/device_calendar",
       &flutter::StandardMethodCodec::GetInstance());
 
-  auto plugin = std::make_unique<DeviceCalendarPlugin>();
+  auto plugin = std::make_unique<DeviceCalendarPlugin>(std::move(channel));
 
-  channel->SetMethodCallHandler(
+  plugin->channel_->SetMethodCallHandler(
       [plugin_pointer = plugin.get()](const auto &call, auto result) {
         plugin_pointer->HandleMethodCall(call, std::move(result));
       });
@@ -224,7 +306,8 @@ void DeviceCalendarPlugin::RegisterWithRegistrar(flutter::PluginRegistrarWindows
   registrar->AddPlugin(std::move(plugin));
 }
 
-DeviceCalendarPlugin::DeviceCalendarPlugin() {}
+DeviceCalendarPlugin::DeviceCalendarPlugin(std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel)
+    : channel_(std::move(channel)) {}
 
 DeviceCalendarPlugin::~DeviceCalendarPlugin() {}
 
@@ -290,19 +373,19 @@ fire_and_forget DeviceCalendarPlugin::RetrieveCalendars(
       if (!first) json << ",";
       first = false;
 
-      std::string id = winrt::to_string(cal.LocalId());
-      std::string name = winrt::to_string(cal.DisplayName());
-      bool isReadOnly = !cal.CanCreateOrUpdateAppointments();
-      int64_t colorArgb = ColorToArgb(cal.DisplayColor());
-      std::string accountName = winrt::to_string(cal.SourceDisplayName());
-      std::string accountType = winrt::to_string(cal.UserDataAccountId());
-      if (accountType.empty()) accountType = "Local";
+      std::string id = SafeGetCalendarId(cal);
+      std::string name = SafeGetCalendarName(cal);
+      bool isReadOnly = SafeGetCalendarIsReadOnly(cal);
+      int64_t colorArgb = SafeGetCalendarColor(cal);
+      std::string accountName = SafeGetCalendarAccountName(cal);
+      std::string accountType = SafeGetCalendarAccountType(cal);
+      bool isDefault = SafeGetCalendarIsDefault(cal);
 
       json << "{"
            << "\"id\":\"" << EscapeJson(id) << "\","
            << "\"name\":\"" << EscapeJson(name) << "\","
            << "\"isReadOnly\":" << (isReadOnly ? "true" : "false") << ","
-           << "\"isDefault\":" << (cal.IsHidden() ? "false" : "true") << ","
+           << "\"isDefault\":" << (isDefault ? "true" : "false") << ","
            << "\"color\":" << colorArgb << ","
            << "\"accountName\":\"" << EscapeJson(accountName) << "\","
            << "\"accountType\":\"" << EscapeJson(accountType) << "\""
@@ -349,7 +432,8 @@ fire_and_forget DeviceCalendarPlugin::CreateCalendar(
     cal.DisplayColor(HexStringToColor(calendarColor));
     co_await cal.SaveAsync();
 
-    result->Success(flutter::EncodableValue(winrt::to_string(cal.LocalId())));
+    std::string calId = SafeGetCalendarId(cal);
+    result->Success(flutter::EncodableValue(calId));
   } catch (const hresult_error& ex) {
     result->Error(std::to_string(ex.code()), winrt::to_string(ex.message()));
   } catch (const std::exception& ex) {
@@ -486,7 +570,7 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
       auto results = co_await cal.FindAppointmentsAsync(startDt, duration, options);
       for (const auto& app : results) {
         if (!filterEventIds.empty()) {
-          std::string id = winrt::to_string(app.LocalId().empty() ? app.RoamingId() : app.LocalId());
+          std::string id = SafeGetEventId(app);
           if (std::find(filterEventIds.begin(), filterEventIds.end(), id) == filterEventIds.end()) {
             continue;
           }
@@ -510,24 +594,15 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
       if (!firstEvent) json << ",";
       firstEvent = false;
 
-      std::string id = winrt::to_string(app.LocalId().empty() ? app.RoamingId() : app.LocalId());
-      std::string title = winrt::to_string(app.Subject());
-      std::string description = winrt::to_string(app.Details());
-      int64_t startMs = DateTimeToEpochMillis(app.StartTime());
-      int64_t endMs = DateTimeToEpochMillis(app.StartTime() + app.Duration());
-      bool allDay = app.AllDay();
-      std::string location = winrt::to_string(app.Location());
-      std::string url = app.Uri() ? winrt::to_string(app.Uri().RawUri()) : "";
-
-      std::string availability = "BUSY";
-      switch (app.BusyStatus()) {
-        case AppointmentBusyStatus::Free: availability = "FREE"; break;
-        case AppointmentBusyStatus::Tentative: availability = "TENTATIVE"; break;
-        case AppointmentBusyStatus::Busy: availability = "BUSY"; break;
-        case AppointmentBusyStatus::OutOfOffice:
-        case AppointmentBusyStatus::WorkingElsewhere: availability = "UNAVAILABLE"; break;
-      }
-
+      std::string id = SafeGetEventId(app);
+      std::string title = SafeGetEventTitle(app);
+      std::string description = SafeGetEventDescription(app);
+      int64_t startMs = SafeGetEventStartTime(app);
+      int64_t endMs = SafeGetEventEndTime(app);
+      bool allDay = SafeGetEventAllDay(app);
+      std::string location = SafeGetEventLocation(app);
+      std::string url = SafeGetEventUrl(app);
+      std::string availability = SafeGetEventAvailability(app);
       std::string status = "CONFIRMED";
 
       json << "{"
@@ -546,81 +621,90 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
            << "\"eventStatus\":\"" << status << "\"";
 
       // Attendees
-      auto invitees = app.Invitees();
-      if (invitees && invitees.Size() > 0) {
-        json << ",\"attendees\":[";
-        bool firstInvitee = true;
-        for (const auto& inv : invitees) {
-          if (!firstInvitee) json << ",";
-          firstInvitee = false;
-          std::string invName = winrt::to_string(inv.DisplayName());
-          std::string invEmail = winrt::to_string(inv.Address());
-          int role = static_cast<int>(inv.Role()) + 1; // 1: Required, 2: Optional, 3: Resource
-          json << "{"
-               << "\"name\":\"" << EscapeJson(invName) << "\","
-               << "\"emailAddress\":\"" << EscapeJson(invEmail) << "\","
-               << "\"role\":" << role << ","
-               << "\"isOrganizer\":false"
-               << "}";
-        }
-        json << "]";
-      }
-
-      // Reminders
-      if (app.Reminder()) {
-        auto remDuration = app.Reminder().Value();
-        int minutes = static_cast<int>(remDuration.count() / (kTicksPerMillisecond * 1000 * 60));
-        json << ",\"reminders\":[{\"minutes\":" << minutes << "}]";
-      }
-
-      // Recurrence
-      auto recurrence = app.Recurrence();
-      if (recurrence) {
-        std::string freq = "DAILY";
-        switch (recurrence.Unit()) {
-          case AppointmentRecurrenceUnit::Daily: freq = "DAILY"; break;
-          case AppointmentRecurrenceUnit::Weekly: freq = "WEEKLY"; break;
-          case AppointmentRecurrenceUnit::Monthly:
-          case AppointmentRecurrenceUnit::MonthlyOnDay: freq = "MONTHLY"; break;
-          case AppointmentRecurrenceUnit::Yearly:
-          case AppointmentRecurrenceUnit::YearlyOnDay: freq = "YEARLY"; break;
-        }
-
-        json << ",\"recurrenceRule\":{"
-             << "\"freq\":\"" << freq << "\","
-             << "\"interval\":" << recurrence.Interval();
-
-        if (recurrence.Occurrences()) {
-          json << ",\"count\":" << recurrence.Occurrences().Value();
-        }
-
-        if (recurrence.Until()) {
-          json << ",\"until\":\"" << FormatIso8601(recurrence.Until().Value()) << "\"";
-        }
-
-        auto days = recurrence.DaysOfWeek();
-        if (days != AppointmentDaysOfWeek::None) {
-          json << ",\"byday\":[";
-          bool firstDay = true;
-          auto appendDay = [&](AppointmentDaysOfWeek dayFlag, const char* name) {
-            if ((days & dayFlag) == dayFlag) {
-              if (!firstDay) json << ",";
-              firstDay = false;
-              json << "\"" << name << "\"";
-            }
-          };
-          appendDay(AppointmentDaysOfWeek::Sunday, "SU");
-          appendDay(AppointmentDaysOfWeek::Monday, "MO");
-          appendDay(AppointmentDaysOfWeek::Tuesday, "TU");
-          appendDay(AppointmentDaysOfWeek::Wednesday, "WE");
-          appendDay(AppointmentDaysOfWeek::Thursday, "TH");
-          appendDay(AppointmentDaysOfWeek::Friday, "FR");
-          appendDay(AppointmentDaysOfWeek::Saturday, "SA");
+      try {
+        auto invitees = app.Invitees();
+        if (invitees && invitees.Size() > 0) {
+          json << ",\"attendees\":[";
+          bool firstInvitee = true;
+          for (const auto& inv : invitees) {
+            if (!firstInvitee) json << ",";
+            firstInvitee = false;
+            std::string invName = "";
+            try { invName = winrt::to_string(inv.DisplayName()); } catch (...) {}
+            std::string invEmail = "";
+            try { invEmail = winrt::to_string(inv.Address()); } catch (...) {}
+            int role = 1;
+            try { role = static_cast<int>(inv.Role()) + 1; } catch (...) {}
+            json << "{"
+                 << "\"name\":\"" << EscapeJson(invName) << "\","
+                 << "\"emailAddress\":\"" << EscapeJson(invEmail) << "\","
+                 << "\"role\":" << role << ","
+                 << "\"isOrganizer\":false"
+                 << "}";
+          }
           json << "]";
         }
+      } catch (...) {}
 
-        json << "}";
-      }
+      // Reminders
+      try {
+        if (app.Reminder()) {
+          auto remDuration = app.Reminder().Value();
+          int minutes = static_cast<int>(remDuration.count() / (kTicksPerMillisecond * 1000 * 60));
+          json << ",\"reminders\":[{\"minutes\":" << minutes << "}]";
+        }
+      } catch (...) {}
+
+      // Recurrence
+      try {
+        auto recurrence = app.Recurrence();
+        if (recurrence) {
+          std::string freq = "DAILY";
+          switch (recurrence.Unit()) {
+            case AppointmentRecurrenceUnit::Daily: freq = "DAILY"; break;
+            case AppointmentRecurrenceUnit::Weekly: freq = "WEEKLY"; break;
+            case AppointmentRecurrenceUnit::Monthly:
+            case AppointmentRecurrenceUnit::MonthlyOnDay: freq = "MONTHLY"; break;
+            case AppointmentRecurrenceUnit::Yearly:
+            case AppointmentRecurrenceUnit::YearlyOnDay: freq = "YEARLY"; break;
+          }
+
+          json << ",\"recurrenceRule\":{"
+               << "\"freq\":\"" << freq << "\","
+               << "\"interval\":" << recurrence.Interval();
+
+          if (recurrence.Occurrences()) {
+            json << ",\"count\":" << recurrence.Occurrences().Value();
+          }
+
+          if (recurrence.Until()) {
+            json << ",\"until\":\"" << FormatIso8601(recurrence.Until().Value()) << "\"";
+          }
+
+          auto days = recurrence.DaysOfWeek();
+          if (days != AppointmentDaysOfWeek::None) {
+            json << ",\"byday\":[";
+            bool firstDay = true;
+            auto appendDay = [&](AppointmentDaysOfWeek dayFlag, const char* name) {
+              if ((days & dayFlag) == dayFlag) {
+                if (!firstDay) json << ",";
+                firstDay = false;
+                json << "\"" << name << "\"";
+              }
+            };
+            appendDay(AppointmentDaysOfWeek::Sunday, "SU");
+            appendDay(AppointmentDaysOfWeek::Monday, "MO");
+            appendDay(AppointmentDaysOfWeek::Tuesday, "TU");
+            appendDay(AppointmentDaysOfWeek::Wednesday, "WE");
+            appendDay(AppointmentDaysOfWeek::Thursday, "TH");
+            appendDay(AppointmentDaysOfWeek::Friday, "FR");
+            appendDay(AppointmentDaysOfWeek::Saturday, "SA");
+            json << "]";
+          }
+
+          json << "}";
+        }
+      } catch (...) {}
 
       json << "}";
     }
@@ -811,9 +895,7 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
 
     co_await cal.SaveAppointmentAsync(appointment);
 
-    std::string savedId = winrt::to_string(appointment.LocalId());
-    if (savedId.empty()) savedId = winrt::to_string(appointment.RoamingId());
-
+    std::string savedId = SafeGetEventId(appointment);
     result->Success(flutter::EncodableValue(savedId));
   } catch (const hresult_error& ex) {
     result->Error(std::to_string(ex.code()), winrt::to_string(ex.message()));

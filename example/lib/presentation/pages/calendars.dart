@@ -121,8 +121,7 @@ class _CalendarsPageState extends State<CalendarsPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    "${_calendars[index]
-                                        .id}: ${_calendars[index].name!}",
+                                    "${_calendars[index].id}: ${_calendars[index].name ?? ''}",
                                     style:
                                     Theme
                                         .of(context)
@@ -130,10 +129,9 @@ class _CalendarsPageState extends State<CalendarsPage> {
                                         .titleSmall,
                                   ),
                                   Text(
-                                      "Account: ${_calendars[index]
-                                          .accountName!}"),
+                                      "Account: ${_calendars[index].accountName ?? ''}"),
                                   Text(
-                                      "type: ${_calendars[index].accountType}"),
+                                      "type: ${_calendars[index].accountType ?? ''}"),
                                 ])),
                         GestureDetector(
                           onTap: () async {
@@ -177,11 +175,11 @@ class _CalendarsPageState extends State<CalendarsPage> {
                             height: 20,
                             decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: Color(_calendars[index].color!)),
+                                color: Color(_calendars[index].color ?? 0xFFFF0000)),
                           ),
                         ),
                         const SizedBox(width: 10),
-                        if (_calendars[index].isDefault!)
+                        if (_calendars[index].isDefault ?? false)
                           Container(
                             margin: const EdgeInsets.fromLTRB(0, 0, 5.0, 0),
                             padding: const EdgeInsets.all(3.0),
@@ -232,9 +230,11 @@ class _CalendarsPageState extends State<CalendarsPage> {
       }
 
       final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
-      setState(() {
-        _calendars = calendarsResult.data as List<Calendar>;
-      });
+      if (mounted) {
+        setState(() {
+          _calendars = calendarsResult.data?.toList() ?? [];
+        });
+      }
     } on PlatformException catch (e, s) {
       debugPrint('RETRIEVE_CALENDARS: $e, $s');
     }
