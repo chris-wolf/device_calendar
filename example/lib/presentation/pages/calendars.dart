@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:collection/collection.dart';
 
 import 'calendar_events.dart';
+import 'integration_test_runner_page.dart';
 
 class CalendarsPage extends StatefulWidget {
   const CalendarsPage({Key? key}) : super(key: key);
@@ -42,10 +43,48 @@ class _CalendarsPageState extends State<CalendarsPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Calendars'),
-        actions: [_getRefreshButton()],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.science),
+            tooltip: 'Run Integration Tests',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const IntegrationTestRunnerPage(),
+                ),
+              );
+            },
+          ),
+          _getRefreshButton(),
+        ],
       ),
       body: Column(
         children: [
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.all(10.0),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              ),
+              icon: const Icon(Icons.play_circle_fill),
+              label: const Text(
+                'Run Comprehensive Integration Test Suite',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const IntegrationTestRunnerPage(),
+                  ),
+                );
+              },
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.all(10.0),
             child: Text(

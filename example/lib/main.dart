@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'common/app_routes.dart';
 import 'presentation/pages/calendars.dart';
+import 'presentation/pages/integration_test_runner_page.dart';
 
 void main() => runApp(const MyApp());
 
@@ -22,7 +23,10 @@ class _MyAppState extends State<MyApp> {
       routes: {
         AppRoutes.calendars: (context) {
           return const CalendarsPage(key: Key('calendarsPage'));
-        }
+        },
+        AppRoutes.integrationTestRunner: (context) {
+          return const IntegrationTestRunnerPage();
+        },
       },
     );
   }

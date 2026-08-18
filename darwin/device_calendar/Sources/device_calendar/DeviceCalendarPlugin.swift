@@ -48,6 +48,16 @@ extension PlatformColor {
         #endif
     }
 
+    #if os(macOS)
+    static func from(cgColor: CGColor) -> PlatformColor? {
+        return NSColor(cgColor: cgColor)
+    }
+    #elseif os(iOS)
+    static func from(cgColor: CGColor) -> PlatformColor? {
+        return UIColor(cgColor: cgColor)
+    }
+    #endif
+
     static func from(rgbValue: Int) -> PlatformColor {
         #if os(iOS)
         return UIColor(
@@ -376,7 +386,7 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
             let defaultCalendar = self.eventStore.defaultCalendarForNewEvents
             var calendars = [DeviceCalendar]()
             for ekCalendar in ekCalendars {
-                let colorInt = PlatformColor(cgColor: ekCalendar.cgColor)?.rgb() ?? 0
+                let colorInt = PlatformColor.from(cgColor: ekCalendar.cgColor)?.rgb() ?? 0
                 let calendar = DeviceCalendar(
                     id: ekCalendar.calendarIdentifier,
                     name: ekCalendar.title,
@@ -929,10 +939,11 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
         let sourceEvent = eventStore.event(withIdentifier: eventId)
         let searchEnd = max(instanceEndDate, instanceStartDate).addingTimeInterval(1)
         let searchStart = instanceStartDate.addingTimeInterval(-1)
+        let searchCalendars: [EKCalendar]? = sourceEvent?.calendar != nil ? [sourceEvent!.calendar] : nil
         let predicate = eventStore.predicateForEvents(
             withStart: searchStart,
             end: searchEnd,
-            calendars: [calendar]
+            calendars: searchCalendars
         )
 
         return eventStore.events(matching: predicate).first { candidate in

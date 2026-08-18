@@ -1070,6 +1070,17 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             if (startDate == null && endDate == null && followingInstances == null) { // Delete all instances
                 println("LOG_REPRO_KOTLIN: Delete all instances branch")
                 val eventsUriWithId = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                val masterEventCursor = contentResolver?.query(
+                    eventsUriWithId,
+                    arrayOf(Events._SYNC_ID),
+                    null, null, null
+                )
+                var masterSyncId: String? = null
+                if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
+                    masterSyncId = masterEventCursor.getString(0)
+                    masterEventCursor.close()
+                }
+
                 val ops = ArrayList<ContentProviderOperation>()
                 val clearRecurrenceValues = ContentValues().apply {
                     putNull(Events.RRULE)
@@ -1085,11 +1096,28 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     ContentProviderOperation.newDelete(buildUri(eventsUriWithId))
                         .build()
                 )
+
+                // Also delete any exception events tied to this master event
+                val exceptionWhere = if (!masterSyncId.isNullOrEmpty()) {
+                    "(${Events.ORIGINAL_ID} = ? OR ${Events.ORIGINAL_SYNC_ID} = ?)"
+                } else {
+                    "${Events.ORIGINAL_ID} = ?"
+                }
+                val exceptionArgs = if (!masterSyncId.isNullOrEmpty()) {
+                    arrayOf(eventIdNumber.toString(), masterSyncId)
+                } else {
+                    arrayOf(eventIdNumber.toString())
+                }
+                ops.add(
+                    ContentProviderOperation.newDelete(buildUri(Events.CONTENT_URI))
+                        .withSelection(exceptionWhere, exceptionArgs)
+                        .build()
+                )
+
                 try {
-                    // Apply both operations as a single atomic batch
+                    // Apply operations as a single atomic batch
                     val results = contentResolver?.applyBatch(CalendarContract.AUTHORITY, ops)
-                    // The delete operation is the second one in the batch (index 1).
-                    // A successful delete will have a count of 1.
+                    // The delete operation is at index 1.
                     val deleteSucceeded = results?.get(1)?.count ?: 0 > 0
                     finishWithSuccess(deleteSucceeded, pendingChannelResult)
                 } catch (e: Exception) {
@@ -1198,97 +1226,76 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     }
                     finishWithSuccess(deleteSucceeded != null, pendingChannelResult)
                 } else { // This and following instances
-                    println("LOG_REPRO_KOTLIN: This and following instances branch")
-                    val eventsUriWithId =
-                        ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
-                    val values = ContentValues()
-                    val instanceCursor = CalendarContract.Instances.query(
-                        contentResolver,
-                        Cst.EVENT_INSTANCE_DELETION,
-                        startDate!!,
-                        endDate!!
+                    println("LOG_REPRO_KOTLIN: This and following instances branch for event $eventIdNumber starting at $startDate")
+                    val eventsUriWithId = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
+                    val masterEventCursor = contentResolver?.query(
+                        eventsUriWithId,
+                        arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE, Events.RRULE),
+                        null, null, null
                     )
-                    println("LOG_REPRO_KOTLIN: instanceCursor size: ${instanceCursor.count}")
+                    var masterStart: Long? = null
+                    var masterDuration: String? = null
+                    var masterTimezone: String? = null
+                    var masterRrule: String? = null
+                    if (masterEventCursor != null && masterEventCursor.moveToFirst()) {
+                        masterStart = masterEventCursor.getLong(0)
+                        masterDuration = masterEventCursor.getString(1)
+                        masterTimezone = masterEventCursor.getString(2)
+                        masterRrule = masterEventCursor.getString(3)
+                        masterEventCursor.close()
+                    }
 
-                    while (instanceCursor.moveToNext()) {
-                        val foundEventID =
-                            instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)
-                        println("LOG_REPRO_KOTLIN: foundEventID=$foundEventID, eventIdNumber=$eventIdNumber")
-
-                        if (eventIdNumber == foundEventID) {
-                            val newRule =
-                                Rrule(instanceCursor.getString(Cst.EVENT_INSTANCE_DELETION_RRULE_INDEX))
-                            val lastDate =
-                                instanceCursor.getLong(Cst.EVENT_INSTANCE_DELETION_LAST_DATE_INDEX)
-                            println("LOG_REPRO_KOTLIN: newRule=$newRule, lastDate=$lastDate")
-
-                            if (lastDate > 0 && newRule.count != null && newRule.count > 0) { // Update occurrence rule
-                                println("LOG_REPRO_KOTLIN: Update occurrence rule branch")
-                                val cursor = CalendarContract.Instances.query(
-                                    contentResolver,
-                                    Cst.EVENT_INSTANCE_DELETION,
-                                    startDate,
-                                    lastDate
-                                )
-                                while (cursor.moveToNext()) {
-                                    if (eventIdNumber == cursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
-                                        newRule.count--
-                                    }
-                                }
-                                cursor.close()
-                            } else { // Indefinite and specified date rule
-                                println("LOG_REPRO_KOTLIN: Indefinite and specified date rule branch")
-                                val cursor = CalendarContract.Instances.query(
-                                    contentResolver,
-                                    Cst.EVENT_INSTANCE_DELETION,
-                                    startDate - DateUtils.YEAR_IN_MILLIS,
-                                    startDate - 1
-                                )
-                                var lastRecurrenceDate: Long? = null
-
-                                while (cursor.moveToNext()) {
-                                    if (eventIdNumber == cursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
-                                        lastRecurrenceDate =
-                                            cursor.getLong(Cst.EVENT_INSTANCE_DELETION_END_INDEX)
-                                    }
-                                }
-
-                                if (lastRecurrenceDate != null) {
-                                    newRule.until = DateTime(lastRecurrenceDate)
-                                    cursor.close()
-
-                                    println("LOG_REPRO_KOTLIN: updated newRule: $newRule")
-                                    values.put(Events.RRULE, newRule.toString())
-                                    values.putNull(Events.LAST_DATE)
-
-                                    val eventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventIdNumber)
-                                    val eventCursor = contentResolver?.query(
-                                        eventUri,
-                                        arrayOf(Events.DTSTART, Events.DURATION, Events.EVENT_TIMEZONE),
-                                        null, null, null
-                                    )
-                                    if (eventCursor != null && eventCursor.moveToFirst()) {
-                                        values.put(Events.DTSTART, eventCursor.getLong(0))
-                                        values.put(Events.DURATION, eventCursor.getString(1))
-                                        values.put(Events.EVENT_TIMEZONE, eventCursor.getString(2))
-                                        eventCursor.close()
-                                    }
-
-                                    val targetUri = eventsUriWithId
-                                    println("LOG_REPRO_KOTLIN: updating event $eventIdNumber via $targetUri with values: $values")
-                                    contentResolver?.update(targetUri, values, null, null)
-                                    finishWithSuccess(true, pendingChannelResult)
-                                } else {
-                                    cursor.close()
-                                    println("LOG_REPRO_KOTLIN: deleting event $eventIdNumber because all occurrences are deleted")
-                                    val targetUri = eventsUriWithId
-                                    contentResolver?.delete(targetUri, null, null)
-                                    finishWithSuccess(true, pendingChannelResult)
+                    if (masterRrule.isNullOrEmpty()) {
+                        println("LOG_REPRO_KOTLIN: master event has no RRULE, deleting entire event")
+                        contentResolver?.delete(buildUri(eventsUriWithId), null, null)
+                        finishWithSuccess(true, pendingChannelResult)
+                    } else {
+                        val newRule = Rrule(masterRrule)
+                        val queryStart = masterStart ?: (startDate!! - DateUtils.YEAR_IN_MILLIS)
+                        val cursor = CalendarContract.Instances.query(
+                            contentResolver,
+                            Cst.EVENT_INSTANCE_DELETION,
+                            queryStart,
+                            startDate!! - 1
+                        )
+                        var lastRecurrenceDate: Long? = null
+                        var remainingCount = 0
+                        if (cursor != null) {
+                            while (cursor.moveToNext()) {
+                                if (eventIdNumber == cursor.getLong(Cst.EVENT_INSTANCE_DELETION_ID_INDEX)) {
+                                    remainingCount++
+                                    lastRecurrenceDate = cursor.getLong(Cst.EVENT_INSTANCE_DELETION_END_INDEX)
                                 }
                             }
+                            cursor.close()
+                        }
+                        println("LOG_REPRO_KOTLIN: remainingCount=$remainingCount, lastRecurrenceDate=$lastRecurrenceDate")
+
+                        if (lastRecurrenceDate != null && remainingCount > 0) {
+                            if (newRule.count != null && newRule.count > 0) {
+                                newRule.count = remainingCount
+                            } else {
+                                newRule.until = DateTime(lastRecurrenceDate)
+                            }
+
+                            val values = ContentValues().apply {
+                                put(Events.RRULE, newRule.toString())
+                                putNull(Events.LAST_DATE)
+                                if (masterStart != null) put(Events.DTSTART, masterStart)
+                                if (masterDuration != null) put(Events.DURATION, masterDuration)
+                                if (masterTimezone != null) put(Events.EVENT_TIMEZONE, masterTimezone)
+                            }
+                            val targetUri = buildUri(eventsUriWithId)
+                            println("LOG_REPRO_KOTLIN: updating event $eventIdNumber via $targetUri with values: $values")
+                            contentResolver?.update(targetUri, values, null, null)
+                            finishWithSuccess(true, pendingChannelResult)
+                        } else {
+                            println("LOG_REPRO_KOTLIN: deleting event $eventIdNumber because 0 instances remain prior to $startDate")
+                            val targetUri = buildUri(eventsUriWithId)
+                            contentResolver?.delete(targetUri, null, null)
+                            finishWithSuccess(true, pendingChannelResult)
                         }
                     }
-                    instanceCursor.close()
                 }
             }
         } else {
