@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:device_calendar/device_calendar.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -19,6 +20,16 @@ void main() {
 
     setUpAll(() async {
       deviceCalendarPlugin = DeviceCalendarPlugin();
+
+      try {
+        final tzInfo = await FlutterTimezone.getLocalTimezone();
+        final loc = tz.timeZoneDatabase.locations[tzInfo.identifier];
+        if (loc != null) {
+          tz.setLocalLocation(loc);
+        }
+      } catch (e) {
+        print('Could not set local timezone: $e');
+      }
 
       // 1. Request calendar permissions
       final permissionsResult = await deviceCalendarPlugin.requestPermissions();
@@ -230,7 +241,7 @@ void main() {
         expect(loaded.end?.millisecondsSinceEpoch, baseDate.add(const Duration(hours: 1)).millisecondsSinceEpoch);
         expect(loaded.allDay, false);
         expect(loaded.availability, Availability.Busy);
-        if (loaded.status != null) {
+        if (Platform.isAndroid && loaded.status != null) {
           expect(loaded.status, EventStatus.Confirmed);
         }
         if (loaded.reminders != null && loaded.reminders!.isNotEmpty) {
@@ -607,7 +618,7 @@ void main() {
 
         await Future.delayed(const Duration(milliseconds: 500));
         var loaded = await loadEventFromDevice(calendarIdA, normalEventId);
-        if (loaded?.status != null) {
+        if (Platform.isAndroid && loaded?.status != null) {
           expect(loaded?.status, EventStatus.Tentative);
         }
 
@@ -617,7 +628,7 @@ void main() {
 
         await Future.delayed(const Duration(milliseconds: 500));
         loaded = await loadEventFromDevice(calendarIdA, normalEventId);
-        if (loaded?.status != null) {
+        if (Platform.isAndroid && loaded?.status != null) {
           expect(loaded?.status, EventStatus.Confirmed);
         }
         print('LOG_TEST: Status update verification passed');

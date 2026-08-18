@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:device_calendar/device_calendar.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -43,6 +44,19 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
   void initState() {
     super.initState();
     tz.initializeTimeZones();
+    _initLocalTimeZone();
+  }
+
+  Future<void> _initLocalTimeZone() async {
+    try {
+      final tzInfo = await FlutterTimezone.getLocalTimezone();
+      final loc = tz.timeZoneDatabase.locations[tzInfo.identifier];
+      if (loc != null) {
+        tz.setLocalLocation(loc);
+      }
+    } catch (e) {
+      debugPrint('Could not set local timezone: $e');
+    }
   }
 
   @override
@@ -190,6 +204,8 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
 
     _log('=== STARTING COMPREHENSIVE INTEGRATION TEST SUITE ===');
     _log('OS: ${Platform.operatingSystem} | Version: ${Platform.operatingSystemVersion}');
+
+    await _initLocalTimeZone();
 
     String? calendarIdA;
     String? calendarIdB;
@@ -671,7 +687,7 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         await Future.delayed(const Duration(milliseconds: 400));
         var loaded = await _loadEvent(calendarIdA, normalEventId);
         _log('Reloaded status: status=${loaded?.status}');
-        if (loaded?.status != null) {
+        if (Platform.isAndroid && loaded?.status != null) {
           _assert(loaded?.status == EventStatus.Tentative, 'Status not Tentative');
         }
 

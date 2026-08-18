@@ -143,6 +143,7 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
         let eventStartDate: Int64
         let eventEndDate: Int64
         let eventStartTimeZone: String?
+        let eventEndTimeZone: String?
         let eventAllDay: Bool
         let attendees: [Attendee]
         let eventLocation: String?
@@ -547,6 +548,7 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
         }
 
         let recurrenceRule = parseEKRecurrenceRules(ekEvent)
+        let timeZoneId = ekEvent.timeZone?.identifier ?? TimeZone.current.identifier
         let event = Event(
             eventId: ekEvent.eventIdentifier,
             calendarId: calendarId,
@@ -554,7 +556,8 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
             eventDescription: ekEvent.notes,
             eventStartDate: Int64(ekEvent.startDate.millisecondsSinceEpoch),
             eventEndDate: Int64(ekEvent.endDate.millisecondsSinceEpoch),
-            eventStartTimeZone: ekEvent.timeZone?.identifier,
+            eventStartTimeZone: timeZoneId,
+            eventEndTimeZone: timeZoneId,
             eventAllDay: ekEvent.isAllDay,
             attendees: attendees,
             eventLocation: ekEvent.location,
@@ -985,6 +988,8 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
         if !isAllDay {
             ekEvent.timeZone =
                 TimeZone(identifier: startTimeZoneString ?? TimeZone.current.identifier) ?? .current
+        } else {
+            ekEvent.timeZone = nil
         }
 
         ekEvent.calendar = calendar
