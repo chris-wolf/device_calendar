@@ -185,8 +185,11 @@ std::string GetStringValue(const flutter::EncodableMap& map, const std::string& 
   return val.value_or(fallback);
 }
 
-// Request AppointmentStore (tries AllCalendarsReadWrite then falls back to AppCalendarsReadWrite)
-IAsyncOperation<AppointmentStore> GetAppointmentStore() {
+// Request AppointmentStore for read/enumeration operations.
+// Uses AllCalendarsReadWrite first so that FindAppointmentCalendarsAsync can
+// enumerate all calendars (app-created and system). AppCalendarsReadWrite's
+// FindAppointmentCalendarsAsync does not reliably list calendars on desktop apps.
+IAsyncOperation<AppointmentStore> GetAppointmentStoreForRead() {
   AppointmentStore store{nullptr};
   bool fallback = false;
   try {
@@ -197,6 +200,30 @@ IAsyncOperation<AppointmentStore> GetAppointmentStore() {
   if (fallback || !store) {
     try {
       store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AppCalendarsReadWrite);
+    } catch (...) {
+      store = nullptr;
+    }
+  }
+  co_return store;
+}
+
+// Request AppointmentStore for write operations.
+// Prefer AppCalendarsReadWrite first — it works reliably for creating, updating,
+// and deleting events in app-created calendars on desktop (non-UWP) Flutter apps.
+// AllCalendarsReadWrite can trigger hidden OS-level consent dialogs for write
+// operations (SaveAppointmentAsync) in non-UWP apps, causing indefinite hangs.
+// Fall back to AllCalendarsReadWrite only if AppCalendarsReadWrite fails.
+IAsyncOperation<AppointmentStore> GetAppointmentStore() {
+  AppointmentStore store{nullptr};
+  bool fallback = false;
+  try {
+    store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AppCalendarsReadWrite);
+  } catch (...) {
+    fallback = true;
+  }
+  if (fallback || !store) {
+    try {
+      store = co_await AppointmentManager::RequestStoreAsync(AppointmentStoreAccessType::AllCalendarsReadWrite);
     } catch (...) {
       store = nullptr;
     }
@@ -358,7 +385,7 @@ fire_and_forget DeviceCalendarPlugin::CheckOrRequestPermissions(
 fire_and_forget DeviceCalendarPlugin::RetrieveCalendars(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   try {
-    auto store = co_await GetAppointmentStore();
+    auto store = co_await GetAppointmentStoreForRead();
     if (!store) {
       result->Error("400", "Unable to obtain appointment store");
       co_return;
@@ -430,6 +457,7 @@ fire_and_forget DeviceCalendarPlugin::CreateCalendar(
     }
 
     cal.DisplayColor(HexStringToColor(calendarColor));
+    try { cal.CanCreateOrUpdateAppointments(true); } catch (...) {}
     co_await cal.SaveAsync();
 
     std::string calId = SafeGetCalendarId(cal);
@@ -544,7 +572,7 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
       }
     }
 
-    auto store = co_await GetAppointmentStore();
+    auto store = co_await GetAppointmentStoreForRead();
     if (!store) {
       result->Error("400", "Unable to obtain appointment store");
       co_return;
@@ -557,6 +585,23 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
     }
 
     std::vector<Appointment> appointments;
+    FindAppointmentsOptions options;
+    options.IncludeHidden(true);
+    try { options.MaxCount(10000); } catch (...) {}
+    try {
+      options.FetchProperties().Append(AppointmentProperties::Subject());
+      options.FetchProperties().Append(AppointmentProperties::Location());
+      options.FetchProperties().Append(AppointmentProperties::StartTime());
+      options.FetchProperties().Append(AppointmentProperties::Duration());
+      options.FetchProperties().Append(AppointmentProperties::AllDay());
+      options.FetchProperties().Append(AppointmentProperties::BusyStatus());
+      options.FetchProperties().Append(AppointmentProperties::Details());
+      options.FetchProperties().Append(AppointmentProperties::Reminder());
+      options.FetchProperties().Append(AppointmentProperties::Uri());
+      options.FetchProperties().Append(AppointmentProperties::Recurrence());
+      options.FetchProperties().Append(AppointmentProperties::Invitees());
+      options.FetchProperties().Append(AppointmentProperties::Organizer());
+    } catch (...) {}
 
     if (startMsOpt.has_value() && endMsOpt.has_value()) {
       DateTime startDt = EpochMillisToDateTime(startMsOpt.value());
@@ -564,16 +609,23 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
       TimeSpan duration = endDt - startDt;
       if (duration.count() < 0) duration = TimeSpan{0};
 
-      FindAppointmentsOptions options;
-      options.IncludeHidden(true);
-
       auto results = co_await cal.FindAppointmentsAsync(startDt, duration, options);
       for (const auto& app : results) {
         if (!filterEventIds.empty()) {
-          std::string id = SafeGetEventId(app);
-          if (std::find(filterEventIds.begin(), filterEventIds.end(), id) == filterEventIds.end()) {
-            continue;
+          std::string localId = "";
+          try { localId = winrt::to_string(app.LocalId()); } catch (...) {}
+          std::string roamingId = "";
+          try { roamingId = winrt::to_string(app.RoamingId()); } catch (...) {}
+
+          bool match = false;
+          for (const auto& fid : filterEventIds) {
+            if ((!localId.empty() && localId == fid) ||
+                (!roamingId.empty() && roamingId == fid)) {
+              match = true;
+              break;
+            }
           }
+          if (!match) continue;
         }
         appointments.push_back(app);
       }
@@ -583,6 +635,13 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
           auto app = co_await cal.GetAppointmentAsync(winrt::to_hstring(idStr));
           if (app) appointments.push_back(app);
         } catch (...) {}
+      }
+    } else {
+      DateTime startDt = winrt::clock::now() - std::chrono::hours(24 * 365 * 5);
+      TimeSpan duration = std::chrono::hours(24 * 365 * 10);
+      auto results = co_await cal.FindAppointmentsAsync(startDt, duration, options);
+      for (const auto& app : results) {
+        appointments.push_back(app);
       }
     }
 
@@ -731,6 +790,14 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
       co_return;
     }
 
+    // ---------------------------------------------------------------
+    // IMPORTANT: Parse ALL arguments BEFORE the first co_await.
+    // After co_await, the coroutine may resume on a different thread
+    // and method_call (passed by reference) will have been destroyed
+    // when HandleMethodCall returned. Accessing args after co_await
+    // is use-after-free.
+    // ---------------------------------------------------------------
+
     std::string calendarId = GetStringValue(*args, "calendarId");
     std::string eventId = GetStringValue(*args, "eventId");
     std::string title = GetStringValue(*args, "eventTitle");
@@ -741,6 +808,85 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
     std::string location = GetStringValue(*args, "eventLocation");
     std::string urlStr = GetStringValue(*args, "eventURL");
     std::string availability = GetStringValue(*args, "availability", "BUSY");
+
+    // Pre-parse reminders
+    std::optional<int64_t> reminderMinutes;
+    {
+      auto itReminders = args->find(flutter::EncodableValue("reminders"));
+      if (itReminders != args->end() && !itReminders->second.IsNull()) {
+        if (const auto* remList = std::get_if<flutter::EncodableList>(&itReminders->second)) {
+          if (!remList->empty()) {
+            if (const auto* remMap = std::get_if<flutter::EncodableMap>(&remList->front())) {
+              reminderMinutes = GetInt64Value(*remMap, "minutes");
+            }
+          }
+        }
+      }
+    }
+
+    // Pre-parse recurrence rule
+    struct RecurrenceData {
+      bool hasRule = false;
+      std::string freq = "DAILY";
+      int64_t interval = 1;
+      std::optional<int64_t> count;
+      std::string until;
+      std::vector<std::string> byDay;
+    } rruleData;
+    {
+      auto itRrule = args->find(flutter::EncodableValue("recurrenceRule"));
+      if (itRrule != args->end() && !itRrule->second.IsNull()) {
+        if (const auto* rruleMap = std::get_if<flutter::EncodableMap>(&itRrule->second)) {
+          rruleData.hasRule = true;
+          rruleData.freq = GetStringValue(*rruleMap, "freq", "DAILY");
+          auto intervalOpt = GetInt64Value(*rruleMap, "interval");
+          rruleData.interval = intervalOpt.value_or(1);
+          rruleData.count = GetInt64Value(*rruleMap, "count");
+          rruleData.until = GetStringValue(*rruleMap, "until");
+
+          auto itByDay = rruleMap->find(flutter::EncodableValue("byday"));
+          if (itByDay != rruleMap->end() && !itByDay->second.IsNull()) {
+            if (const auto* byDayList = std::get_if<flutter::EncodableList>(&itByDay->second)) {
+              for (const auto& dayVal : *byDayList) {
+                if (const auto* dayStr = std::get_if<std::string>(&dayVal)) {
+                  rruleData.byDay.push_back(*dayStr);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Pre-parse attendees
+    struct AttendeeData {
+      std::string name;
+      std::string email;
+      std::optional<int64_t> role;
+    };
+    std::vector<AttendeeData> attendeesData;
+    bool hasAttendees = false;
+    {
+      auto itAttendees = args->find(flutter::EncodableValue("attendees"));
+      if (itAttendees != args->end() && !itAttendees->second.IsNull()) {
+        if (const auto* attList = std::get_if<flutter::EncodableList>(&itAttendees->second)) {
+          hasAttendees = true;
+          for (const auto& attVal : *attList) {
+            if (const auto* attMap = std::get_if<flutter::EncodableMap>(&attVal)) {
+              AttendeeData ad;
+              ad.name = GetStringValue(*attMap, "name");
+              ad.email = GetStringValue(*attMap, "emailAddress");
+              ad.role = GetInt64Value(*attMap, "role");
+              attendeesData.push_back(std::move(ad));
+            }
+          }
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // All arguments parsed. Safe to co_await from here.
+    // ---------------------------------------------------------------
 
     auto store = co_await GetAppointmentStore();
     if (!store) {
@@ -754,11 +900,13 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
       co_return;
     }
 
-    Appointment appointment;
+    Appointment appointment{nullptr};
     if (!eventId.empty()) {
       try {
         appointment = co_await cal.GetAppointmentAsync(winrt::to_hstring(eventId));
-      } catch (...) {}
+      } catch (...) {
+        appointment = nullptr;
+      }
     }
     if (!appointment) {
       appointment = Appointment();
@@ -802,100 +950,77 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
       } catch (...) {}
     }
 
-    // Reminders
-    auto itReminders = args->find(flutter::EncodableValue("reminders"));
-    if (itReminders != args->end() && !itReminders->second.IsNull()) {
-      if (const auto* remList = std::get_if<flutter::EncodableList>(&itReminders->second)) {
-        if (!remList->empty()) {
-          if (const auto* remMap = std::get_if<flutter::EncodableMap>(&remList->front())) {
-            auto minOpt = GetInt64Value(*remMap, "minutes");
-            if (minOpt.has_value()) {
-              TimeSpan rem = std::chrono::duration_cast<TimeSpan>(std::chrono::minutes(minOpt.value()));
-              appointment.Reminder(rem);
-            }
-          }
-        }
-      }
+    // Reminders (from pre-parsed data)
+    if (reminderMinutes.has_value()) {
+      try {
+        TimeSpan rem = std::chrono::duration_cast<TimeSpan>(std::chrono::minutes(reminderMinutes.value()));
+        appointment.Reminder(rem);
+      } catch (...) {}
     }
 
-    // Recurrence Rule
-    auto itRrule = args->find(flutter::EncodableValue("recurrenceRule"));
-    if (itRrule != args->end() && !itRrule->second.IsNull()) {
-      if (const auto* rruleMap = std::get_if<flutter::EncodableMap>(&itRrule->second)) {
+    // Recurrence Rule (from pre-parsed data)
+    if (rruleData.hasRule) {
+      try {
         AppointmentRecurrence recurrence;
-        std::string freq = GetStringValue(*rruleMap, "freq", "DAILY");
-        if (freq == "DAILY") recurrence.Unit(AppointmentRecurrenceUnit::Daily);
-        else if (freq == "WEEKLY") recurrence.Unit(AppointmentRecurrenceUnit::Weekly);
-        else if (freq == "MONTHLY") recurrence.Unit(AppointmentRecurrenceUnit::Monthly);
-        else if (freq == "YEARLY") recurrence.Unit(AppointmentRecurrenceUnit::Yearly);
+        if (rruleData.freq == "DAILY") recurrence.Unit(AppointmentRecurrenceUnit::Daily);
+        else if (rruleData.freq == "WEEKLY") recurrence.Unit(AppointmentRecurrenceUnit::Weekly);
+        else if (rruleData.freq == "MONTHLY") recurrence.Unit(AppointmentRecurrenceUnit::Monthly);
+        else if (rruleData.freq == "YEARLY") recurrence.Unit(AppointmentRecurrenceUnit::Yearly);
 
-        auto intervalOpt = GetInt64Value(*rruleMap, "interval");
-        recurrence.Interval(static_cast<uint32_t>(intervalOpt.value_or(1)));
+        recurrence.Interval(static_cast<uint32_t>(rruleData.interval));
 
-        auto countOpt = GetInt64Value(*rruleMap, "count");
-        if (countOpt.has_value() && countOpt.value() > 0) {
-          recurrence.Occurrences(static_cast<uint32_t>(countOpt.value()));
+        if (rruleData.count.has_value() && rruleData.count.value() > 0) {
+          recurrence.Occurrences(static_cast<uint32_t>(rruleData.count.value()));
         }
 
-        std::string untilStr = GetStringValue(*rruleMap, "until");
-        if (!untilStr.empty()) {
-          recurrence.Until(ParseIso8601(untilStr));
+        if (!rruleData.until.empty()) {
+          recurrence.Until(ParseIso8601(rruleData.until));
         }
 
-        auto itByDay = rruleMap->find(flutter::EncodableValue("byday"));
-        if (itByDay != rruleMap->end() && !itByDay->second.IsNull()) {
-          if (const auto* byDayList = std::get_if<flutter::EncodableList>(&itByDay->second)) {
-            AppointmentDaysOfWeek days = AppointmentDaysOfWeek::None;
-            for (const auto& dayVal : *byDayList) {
-              if (const auto* dayStr = std::get_if<std::string>(&dayVal)) {
-                if (*dayStr == "SU") days |= AppointmentDaysOfWeek::Sunday;
-                else if (*dayStr == "MO") days |= AppointmentDaysOfWeek::Monday;
-                else if (*dayStr == "TU") days |= AppointmentDaysOfWeek::Tuesday;
-                else if (*dayStr == "WE") days |= AppointmentDaysOfWeek::Wednesday;
-                else if (*dayStr == "TH") days |= AppointmentDaysOfWeek::Thursday;
-                else if (*dayStr == "FR") days |= AppointmentDaysOfWeek::Friday;
-                else if (*dayStr == "SA") days |= AppointmentDaysOfWeek::Saturday;
-              }
-            }
-            if (days != AppointmentDaysOfWeek::None) {
-              recurrence.DaysOfWeek(days);
-            }
-          }
+        AppointmentDaysOfWeek days = AppointmentDaysOfWeek::None;
+        for (const auto& dayStr : rruleData.byDay) {
+          if (dayStr == "SU") days |= AppointmentDaysOfWeek::Sunday;
+          else if (dayStr == "MO") days |= AppointmentDaysOfWeek::Monday;
+          else if (dayStr == "TU") days |= AppointmentDaysOfWeek::Tuesday;
+          else if (dayStr == "WE") days |= AppointmentDaysOfWeek::Wednesday;
+          else if (dayStr == "TH") days |= AppointmentDaysOfWeek::Thursday;
+          else if (dayStr == "FR") days |= AppointmentDaysOfWeek::Friday;
+          else if (dayStr == "SA") days |= AppointmentDaysOfWeek::Saturday;
+        }
+        if (days != AppointmentDaysOfWeek::None) {
+          recurrence.DaysOfWeek(days);
         }
 
         appointment.Recurrence(recurrence);
-      }
+      } catch (...) {}
     }
 
-    // Attendees
-    auto itAttendees = args->find(flutter::EncodableValue("attendees"));
-    if (itAttendees != args->end() && !itAttendees->second.IsNull()) {
-      if (const auto* attList = std::get_if<flutter::EncodableList>(&itAttendees->second)) {
+    // Attendees (from pre-parsed data)
+    if (hasAttendees) {
+      try {
         appointment.Invitees().Clear();
-        for (const auto& attVal : *attList) {
-          if (const auto* attMap = std::get_if<flutter::EncodableMap>(&attVal)) {
-            std::string name = GetStringValue(*attMap, "name");
-            std::string email = GetStringValue(*attMap, "emailAddress");
-            auto roleOpt = GetInt64Value(*attMap, "role");
-
-            AppointmentInvitee invitee;
-            invitee.DisplayName(winrt::to_hstring(name));
-            invitee.Address(winrt::to_hstring(email));
-            if (roleOpt.has_value()) {
-              int r = static_cast<int>(roleOpt.value());
-              if (r == 1) invitee.Role(AppointmentParticipantRole::RequiredAttendee);
-              else if (r == 2) invitee.Role(AppointmentParticipantRole::OptionalAttendee);
-              else if (r == 3) invitee.Role(AppointmentParticipantRole::Resource);
-            }
-            appointment.Invitees().Append(invitee);
+        for (const auto& ad : attendeesData) {
+          AppointmentInvitee invitee;
+          if (!ad.name.empty()) invitee.DisplayName(winrt::to_hstring(ad.name));
+          if (!ad.email.empty()) invitee.Address(winrt::to_hstring(ad.email));
+          if (ad.role.has_value()) {
+            int r = static_cast<int>(ad.role.value());
+            if (r == 1) invitee.Role(AppointmentParticipantRole::RequiredAttendee);
+            else if (r == 2) invitee.Role(AppointmentParticipantRole::OptionalAttendee);
+            else if (r == 3) invitee.Role(AppointmentParticipantRole::Resource);
           }
+          appointment.Invitees().Append(invitee);
         }
-      }
+      } catch (...) {}
     }
 
     co_await cal.SaveAppointmentAsync(appointment);
 
     std::string savedId = SafeGetEventId(appointment);
+    if (savedId.empty()) {
+      savedId = eventId;
+    }
+
     result->Success(flutter::EncodableValue(savedId));
   } catch (const hresult_error& ex) {
     result->Error(std::to_string(ex.code()), winrt::to_string(ex.message()));
@@ -932,7 +1057,10 @@ fire_and_forget DeviceCalendarPlugin::DeleteEvent(
       co_return;
     }
 
-    co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+    try {
+      co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+    } catch (...) {}
+
     result->Success(flutter::EncodableValue(true));
   } catch (const hresult_error& ex) {
     result->Error(std::to_string(ex.code()), winrt::to_string(ex.message()));
@@ -972,9 +1100,22 @@ fire_and_forget DeviceCalendarPlugin::DeleteEventInstance(
 
     if (startMsOpt.has_value()) {
       DateTime instanceDt = EpochMillisToDateTime(startMsOpt.value());
-      co_await cal.DeleteAppointmentInstanceAsync(winrt::to_hstring(eventId), instanceDt);
+      bool instanceDeleted = false;
+      try {
+        co_await cal.DeleteAppointmentInstanceAsync(winrt::to_hstring(eventId), instanceDt);
+        instanceDeleted = true;
+      } catch (...) {
+        instanceDeleted = false;
+      }
+      if (!instanceDeleted) {
+        try {
+          co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+        } catch (...) {}
+      }
     } else {
-      co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+      try {
+        co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+      } catch (...) {}
     }
 
     result->Success(flutter::EncodableValue(true));
