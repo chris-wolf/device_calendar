@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "FlutterGeneratedPluginSwiftPackage", type: .static, targets: ["FlutterGeneratedPluginSwiftPackage"])
     ],
     dependencies: [
+        .package(name: "device_calendar", path: "../.packages/device_calendar"),
         .package(name: "flutter_timezone", path: "../.packages/flutter_timezone-5.1.0"),
         .package(name: "integration_test", path: "../.packages/integration_test"),
         .package(name: "FlutterFramework", path: "../.packages/FlutterFramework")
@@ -23,6 +24,7 @@ let package = Package(
         .target(
             name: "FlutterGeneratedPluginSwiftPackage",
             dependencies: [
+                .product(name: "device-calendar", package: "device_calendar"),
                 .product(name: "flutter-timezone", package: "flutter_timezone"),
                 .product(name: "integration-test", package: "integration_test"),
                 .product(name: "FlutterFramework", package: "FlutterFramework")

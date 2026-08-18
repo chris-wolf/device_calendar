@@ -52,11 +52,11 @@ class Attendee {
         false; // Getting and setting an organiser for Android
     isCurrentUser = json['isCurrentUser'] ?? false;
 
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid && json['attendanceStatus'] != null) {
       androidAttendeeDetails = AndroidAttendeeDetails.fromJson(json);
     }
 
-    if (Platform.isIOS) {
+    if ((Platform.isIOS || Platform.isMacOS) && json['attendanceStatus'] != null) {
       iosAttendeeDetails = IosAttendeeDetails.fromJson(json);
     }
   }

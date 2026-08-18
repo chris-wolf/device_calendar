@@ -73,7 +73,7 @@ class _CalendarEventPageState extends State<CalendarEventPage> {
 
   void getCurentLocation() async {
     try {
-      _timezone = await FlutterTimezone.getLocalTimezone();
+      _timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
     } catch (e) {
       debugPrint('Could not get the local timezone');
     }
@@ -1065,8 +1065,6 @@ class _CalendarEventPageState extends State<CalendarEventPage> {
         return const Text('After a set number of times');
       case RecurrenceRuleEndType.SpecifiedEndDate:
         return const Text('Continues until a specified date');
-      default:
-        return const Text('');
     }
   }
 
@@ -1120,7 +1118,6 @@ class _CalendarEventPageState extends State<CalendarEventPage> {
         ]);
         break;
       case DayOfWeekGroup.None:
-      default:
         _rrule?.byWeekDays.clear();
         break;
     }

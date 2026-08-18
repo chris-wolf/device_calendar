@@ -155,8 +155,6 @@ extension ColorChoiceExtension on ColorChoice {
         return Colors.black;
       case ColorChoice.White:
         return Colors.white;
-      default:
-        return Colors.red;
     }
   }
 
