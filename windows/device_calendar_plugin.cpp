@@ -155,6 +155,104 @@ inline DateTime ParseIso8601(const std::string& dateStr) {
   return winrt::clock::now();
 }
 
+inline std::vector<int64_t> ParseRemindersCsv(const std::string& csv) {
+  std::vector<int64_t> result;
+  std::stringstream ss(csv);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (!item.empty()) {
+      try {
+        result.push_back(std::stoll(item));
+      } catch (...) {}
+    }
+  }
+  return result;
+}
+
+inline std::string FormatRemindersCsv(const std::vector<int64_t>& minutes) {
+  std::ostringstream ss;
+  for (size_t i = 0; i < minutes.size(); ++i) {
+    if (i > 0) ss << ",";
+    ss << minutes[i];
+  }
+  return ss.str();
+}
+
+inline std::pair<std::string, std::vector<int64_t>> ExtractDescriptionAndReminders(const std::string& raw) {
+  const std::string tagPrefix = "<!--dc_reminders:";
+  const std::string tagSuffix = "-->";
+  size_t startPos = raw.find(tagPrefix);
+  if (startPos == std::string::npos) {
+    return {raw, {}};
+  }
+  size_t endPos = raw.find(tagSuffix, startPos);
+  if (endPos == std::string::npos) {
+    return {raw, {}};
+  }
+  std::string csv = raw.substr(startPos + tagPrefix.length(), endPos - (startPos + tagPrefix.length()));
+  std::vector<int64_t> reminders = ParseRemindersCsv(csv);
+
+  std::string clean = raw.substr(0, startPos);
+  if (!clean.empty() && clean.back() == '\n') {
+    clean.pop_back();
+  }
+  if (endPos + tagSuffix.length() < raw.length()) {
+    clean += raw.substr(endPos + tagSuffix.length());
+  }
+  return {clean, reminders};
+}
+
+inline std::string EncodeDescriptionWithReminders(const std::string& desc, const std::vector<int64_t>& reminders) {
+  if (reminders.size() <= 1) {
+    return desc;
+  }
+  std::string result = desc;
+  if (!result.empty()) {
+    result += "\n";
+  }
+  result += "<!--dc_reminders:" + FormatRemindersCsv(reminders) + "-->";
+  return result;
+}
+
+inline int64_t GetAllDayStartEpochMillis(const DateTime& dt) {
+  int64_t epochMs = DateTimeToEpochMillis(dt);
+  std::time_t t = static_cast<std::time_t>(epochMs / 1000);
+  std::tm tmLocal{};
+  localtime_s(&tmLocal, &t);
+
+  std::tm tmUtc{};
+  tmUtc.tm_year = tmLocal.tm_year;
+  tmUtc.tm_mon = tmLocal.tm_mon;
+  tmUtc.tm_mday = tmLocal.tm_mday;
+  tmUtc.tm_hour = 0;
+  tmUtc.tm_min = 0;
+  tmUtc.tm_sec = 0;
+  std::time_t tUtc = _mkgmtime(&tmUtc);
+  return static_cast<int64_t>(tUtc) * 1000;
+}
+
+inline int64_t GetAllDayEndEpochMillis(const DateTime& startDt, const TimeSpan& duration) {
+  DateTime endDt = startDt + duration;
+  int64_t endEpochMs = DateTimeToEpochMillis(endDt);
+  std::time_t t = static_cast<std::time_t>(endEpochMs / 1000);
+  std::tm tmCheck{};
+  localtime_s(&tmCheck, &t);
+  if (tmCheck.tm_hour == 0 && tmCheck.tm_min == 0 && tmCheck.tm_sec == 0) {
+    t -= 1;
+    localtime_s(&tmCheck, &t);
+  }
+
+  std::tm tmUtc{};
+  tmUtc.tm_year = tmCheck.tm_year;
+  tmUtc.tm_mon = tmCheck.tm_mon;
+  tmUtc.tm_mday = tmCheck.tm_mday;
+  tmUtc.tm_hour = 23;
+  tmUtc.tm_min = 59;
+  tmUtc.tm_sec = 59;
+  std::time_t tUtc = _mkgmtime(&tmUtc);
+  return static_cast<int64_t>(tUtc) * 1000;
+}
+
 // Extractors for flutter::EncodableValue
 template <typename T>
 std::optional<T> GetValue(const flutter::EncodableMap& map, const std::string& key) {
@@ -268,6 +366,9 @@ inline std::string SafeGetEventId(const Appointment& app) {
   } catch (...) {
     return "";
   }
+}
+inline std::string SafeGetEventCalendarId(const Appointment& app) {
+  try { return winrt::to_string(app.CalendarId()); } catch (...) { return ""; }
 }
 inline std::string SafeGetEventTitle(const Appointment& app) {
   try { return winrt::to_string(app.Subject()); } catch (...) { return ""; }
@@ -601,6 +702,7 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
       options.FetchProperties().Append(AppointmentProperties::Recurrence());
       options.FetchProperties().Append(AppointmentProperties::Invitees());
       options.FetchProperties().Append(AppointmentProperties::Organizer());
+      options.FetchProperties().Append(AppointmentProperties::UserResponse());
     } catch (...) {}
 
     if (startMsOpt.has_value() && endMsOpt.has_value()) {
@@ -655,24 +757,36 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
 
       std::string id = SafeGetEventId(app);
       std::string title = SafeGetEventTitle(app);
-      std::string description = SafeGetEventDescription(app);
-      int64_t startMs = SafeGetEventStartTime(app);
-      int64_t endMs = SafeGetEventEndTime(app);
+      std::string rawDescription = SafeGetEventDescription(app);
+      auto [cleanDescription, customReminders] = ExtractDescriptionAndReminders(rawDescription);
+
       bool allDay = SafeGetEventAllDay(app);
+      int64_t startMs = allDay ? GetAllDayStartEpochMillis(app.StartTime()) : SafeGetEventStartTime(app);
+      int64_t endMs = allDay ? GetAllDayEndEpochMillis(app.StartTime(), app.Duration()) : SafeGetEventEndTime(app);
       std::string location = SafeGetEventLocation(app);
       std::string url = SafeGetEventUrl(app);
       std::string availability = SafeGetEventAvailability(app);
       std::string status = "CONFIRMED";
+      try {
+        switch (app.UserResponse()) {
+          case AppointmentParticipantResponse::Tentative: status = "TENTATIVE"; break;
+          case AppointmentParticipantResponse::Declined: status = "CANCELED"; break;
+          case AppointmentParticipantResponse::None: status = "NONE"; break;
+          case AppointmentParticipantResponse::Accepted:
+          default:
+            status = "CONFIRMED"; break;
+        }
+      } catch (...) {}
 
       json << "{"
            << "\"calendarId\":\"" << EscapeJson(calendarId) << "\","
            << "\"eventId\":\"" << EscapeJson(id) << "\","
            << "\"eventTitle\":\"" << EscapeJson(title) << "\","
-           << "\"eventDescription\":\"" << EscapeJson(description) << "\","
+           << "\"eventDescription\":\"" << EscapeJson(cleanDescription) << "\","
            << "\"eventStartDate\":" << startMs << ","
-           << "\"eventStartTimeZone\":\"UTC\","
+           << "\"eventStartTimeZone\":null,"
            << "\"eventEndDate\":" << endMs << ","
-           << "\"eventEndTimeZone\":\"UTC\","
+           << "\"eventEndTimeZone\":null,"
            << "\"eventAllDay\":" << (allDay ? "true" : "false") << ","
            << "\"eventLocation\":\"" << EscapeJson(location) << "\","
            << "\"eventURL\":" << (url.empty() ? "null" : ("\"" + EscapeJson(url) + "\"")) << ","
@@ -707,10 +821,20 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
 
       // Reminders
       try {
-        if (app.Reminder()) {
+        std::vector<int64_t> remMinutesList = customReminders;
+        if (remMinutesList.empty() && app.Reminder()) {
           auto remDuration = app.Reminder().Value();
           int minutes = static_cast<int>(remDuration.count() / (kTicksPerMillisecond * 1000 * 60));
-          json << ",\"reminders\":[{\"minutes\":" << minutes << "}]";
+          remMinutesList.push_back(minutes);
+        }
+
+        if (!remMinutesList.empty()) {
+          json << ",\"reminders\":[";
+          for (size_t i = 0; i < remMinutesList.size(); ++i) {
+            if (i > 0) json << ",";
+            json << "{\"minutes\":" << remMinutesList[i] << "}";
+          }
+          json << "]";
         }
       } catch (...) {}
 
@@ -734,9 +858,7 @@ fire_and_forget DeviceCalendarPlugin::RetrieveEvents(
 
           if (recurrence.Occurrences()) {
             json << ",\"count\":" << recurrence.Occurrences().Value();
-          }
-
-          if (recurrence.Until()) {
+          } else if (recurrence.Until()) {
             json << ",\"until\":\"" << FormatIso8601(recurrence.Until().Value()) << "\"";
           }
 
@@ -808,16 +930,30 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
     std::string location = GetStringValue(*args, "eventLocation");
     std::string urlStr = GetStringValue(*args, "eventURL");
     std::string availability = GetStringValue(*args, "availability", "BUSY");
+    std::string eventStatus = GetStringValue(*args, "eventStatus", "CONFIRMED");
+
+    auto instanceStartMsOpt = GetInt64Value(*args, "instanceStartDate");
+    auto instanceEndMsOpt = GetInt64Value(*args, "instanceEndDate");
+    auto updateFollowingOpt = GetValue<bool>(*args, "updateFollowingInstances");
+
+    bool allDay = allDayOpt.value_or(false);
+    int64_t startMs = startMsOpt.value_or(0);
+    int64_t endMs = endMsOpt.value_or(startMs);
 
     // Pre-parse reminders
-    std::optional<int64_t> reminderMinutes;
+    std::vector<int64_t> reminderMinutesList;
+    bool hasRemindersKey = false;
     {
       auto itReminders = args->find(flutter::EncodableValue("reminders"));
       if (itReminders != args->end() && !itReminders->second.IsNull()) {
+        hasRemindersKey = true;
         if (const auto* remList = std::get_if<flutter::EncodableList>(&itReminders->second)) {
-          if (!remList->empty()) {
-            if (const auto* remMap = std::get_if<flutter::EncodableMap>(&remList->front())) {
-              reminderMinutes = GetInt64Value(*remMap, "minutes");
+          for (const auto& remVal : *remList) {
+            if (const auto* remMap = std::get_if<flutter::EncodableMap>(&remVal)) {
+              auto mins = GetInt64Value(*remMap, "minutes");
+              if (mins.has_value()) {
+                reminderMinutesList.push_back(mins.value());
+              }
             }
           }
         }
@@ -900,6 +1036,221 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
       co_return;
     }
 
+    auto applyCommonProperties = [&](Appointment& app, int64_t sMs, int64_t eMs, bool isAllDay) {
+      app.Subject(winrt::to_hstring(title));
+
+      std::string encodedDetails = EncodeDescriptionWithReminders(description, reminderMinutesList);
+      app.Details(winrt::to_hstring(encodedDetails));
+
+      app.Location(winrt::to_hstring(location));
+      app.AllDay(isAllDay);
+
+      DateTime sDt = EpochMillisToDateTime(sMs);
+      app.StartTime(sDt);
+      if (isAllDay) {
+        if (eMs >= sMs) {
+          int64_t diffMs = eMs - sMs;
+          int64_t days = (diffMs / 86400000LL) + 1;
+          if (days < 1) days = 1;
+          app.Duration(std::chrono::hours(days * 24));
+        } else {
+          app.Duration(std::chrono::hours(24));
+        }
+      } else {
+        if (eMs >= sMs) {
+          DateTime eDt = EpochMillisToDateTime(eMs);
+          app.Duration(eDt - sDt);
+        } else {
+          app.Duration(TimeSpan{0});
+        }
+      }
+
+      if (availability == "FREE") {
+        app.BusyStatus(AppointmentBusyStatus::Free);
+      } else if (availability == "TENTATIVE") {
+        app.BusyStatus(AppointmentBusyStatus::Tentative);
+      } else if (availability == "UNAVAILABLE") {
+        app.BusyStatus(AppointmentBusyStatus::OutOfOffice);
+      } else {
+        app.BusyStatus(AppointmentBusyStatus::Busy);
+      }
+
+      if (eventStatus == "TENTATIVE") {
+        app.UserResponse(AppointmentParticipantResponse::Tentative);
+      } else if (eventStatus == "CANCELED" || eventStatus == "CANCELLED") {
+        app.UserResponse(AppointmentParticipantResponse::Declined);
+      } else if (eventStatus == "NONE") {
+        app.UserResponse(AppointmentParticipantResponse::None);
+      } else {
+        app.UserResponse(AppointmentParticipantResponse::Accepted);
+      }
+
+      if (!urlStr.empty()) {
+        try {
+          app.Uri(Uri(winrt::to_hstring(urlStr)));
+        } catch (...) {}
+      }
+
+      if (hasRemindersKey) {
+        if (!reminderMinutesList.empty()) {
+          try {
+            TimeSpan rem = std::chrono::duration_cast<TimeSpan>(std::chrono::minutes(reminderMinutesList[0]));
+            app.Reminder(rem);
+          } catch (...) {}
+        } else {
+          try {
+            app.Reminder(nullptr);
+          } catch (...) {}
+        }
+      }
+
+      if (hasAttendees) {
+        try {
+          app.Invitees().Clear();
+          for (const auto& ad : attendeesData) {
+            AppointmentInvitee invitee;
+            if (!ad.name.empty()) invitee.DisplayName(winrt::to_hstring(ad.name));
+            if (!ad.email.empty()) invitee.Address(winrt::to_hstring(ad.email));
+            if (ad.role.has_value()) {
+              int r = static_cast<int>(ad.role.value());
+              if (r == 1) invitee.Role(AppointmentParticipantRole::RequiredAttendee);
+              else if (r == 2) invitee.Role(AppointmentParticipantRole::OptionalAttendee);
+              else if (r == 3) invitee.Role(AppointmentParticipantRole::Resource);
+            }
+            app.Invitees().Append(invitee);
+          }
+        } catch (...) {}
+      }
+    };
+
+    auto buildRecurrenceRule = [&](AppointmentRecurrence& recurrence, int64_t countOverride = -1) {
+      if (rruleData.freq == "DAILY") recurrence.Unit(AppointmentRecurrenceUnit::Daily);
+      else if (rruleData.freq == "WEEKLY") recurrence.Unit(AppointmentRecurrenceUnit::Weekly);
+      else if (rruleData.freq == "MONTHLY") recurrence.Unit(AppointmentRecurrenceUnit::Monthly);
+      else if (rruleData.freq == "YEARLY") recurrence.Unit(AppointmentRecurrenceUnit::Yearly);
+
+      recurrence.Interval(static_cast<uint32_t>(rruleData.interval));
+
+      int64_t cVal = countOverride >= 0 ? countOverride : (rruleData.count.has_value() ? rruleData.count.value() : -1);
+      if (cVal > 0) {
+        recurrence.Occurrences(static_cast<uint32_t>(cVal));
+      } else if (!rruleData.until.empty()) {
+        recurrence.Until(ParseIso8601(rruleData.until));
+      }
+
+      AppointmentDaysOfWeek days = AppointmentDaysOfWeek::None;
+      for (const auto& dayStr : rruleData.byDay) {
+        if (dayStr == "SU") days |= AppointmentDaysOfWeek::Sunday;
+        else if (dayStr == "MO") days |= AppointmentDaysOfWeek::Monday;
+        else if (dayStr == "TU") days |= AppointmentDaysOfWeek::Tuesday;
+        else if (dayStr == "WE") days |= AppointmentDaysOfWeek::Wednesday;
+        else if (dayStr == "TH") days |= AppointmentDaysOfWeek::Thursday;
+        else if (dayStr == "FR") days |= AppointmentDaysOfWeek::Friday;
+        else if (dayStr == "SA") days |= AppointmentDaysOfWeek::Saturday;
+      }
+      if (days == AppointmentDaysOfWeek::None && rruleData.freq == "WEEKLY") {
+        std::time_t t = static_cast<std::time_t>(startMs / 1000);
+        std::tm tm{};
+        gmtime_s(&tm, &t);
+        switch (tm.tm_wday) {
+          case 0: days = AppointmentDaysOfWeek::Sunday; break;
+          case 1: days = AppointmentDaysOfWeek::Monday; break;
+          case 2: days = AppointmentDaysOfWeek::Tuesday; break;
+          case 3: days = AppointmentDaysOfWeek::Wednesday; break;
+          case 4: days = AppointmentDaysOfWeek::Thursday; break;
+          case 5: days = AppointmentDaysOfWeek::Friday; break;
+          case 6: days = AppointmentDaysOfWeek::Saturday; break;
+        }
+      }
+      if (days != AppointmentDaysOfWeek::None) {
+        recurrence.DaysOfWeek(days);
+      }
+    };
+
+    // Case 1: Editing a recurring instance
+    if (instanceStartMsOpt.has_value() && !eventId.empty()) {
+      if (updateFollowingOpt.value_or(false) == false) {
+        // Edit Only This Instance (Single Exception)
+        DateTime origInstDt = EpochMillisToDateTime(instanceStartMsOpt.value());
+        try {
+          co_await cal.DeleteAppointmentInstanceAsync(winrt::to_hstring(eventId), origInstDt);
+        } catch (...) {}
+
+        Appointment newApp;
+        applyCommonProperties(newApp, startMs, endMs, allDay);
+        co_await cal.SaveAppointmentAsync(newApp);
+
+        std::string newId = SafeGetEventId(newApp);
+        result->Success(flutter::EncodableValue(newId));
+        co_return;
+      } else {
+        // Edit This and Future Instances (Series Splitting)
+        Appointment origApp{nullptr};
+        try {
+          origApp = co_await cal.GetAppointmentAsync(winrt::to_hstring(eventId));
+        } catch (...) {
+          origApp = nullptr;
+        }
+
+        int64_t occurrencesBefore = 0;
+        if (origApp && origApp.Recurrence()) {
+          try {
+            FindAppointmentsOptions findOpts;
+            findOpts.IncludeHidden(true);
+            DateTime searchStart = origApp.StartTime();
+            DateTime searchEnd = EpochMillisToDateTime(instanceStartMsOpt.value());
+            TimeSpan searchDur = searchEnd - searchStart;
+            if (searchDur.count() > 0) {
+              auto priorList = co_await cal.FindAppointmentsAsync(searchStart, searchDur, findOpts);
+              for (const auto& app : priorList) {
+                if (SafeGetEventId(app) == eventId) {
+                  if (DateTimeToEpochMillis(app.StartTime()) < instanceStartMsOpt.value()) {
+                    occurrencesBefore++;
+                  }
+                }
+              }
+            }
+          } catch (...) {}
+
+          if (occurrencesBefore == 0) {
+            try {
+              co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+            } catch (...) {}
+          } else {
+            if (origApp.Recurrence().Occurrences()) {
+              origApp.Recurrence().Occurrences(static_cast<uint32_t>(occurrencesBefore));
+            } else {
+              origApp.Recurrence().Until(EpochMillisToDateTime(instanceStartMsOpt.value() - 1));
+            }
+            try {
+              co_await cal.SaveAppointmentAsync(origApp);
+            } catch (...) {}
+          }
+        }
+
+        Appointment newSeriesApp;
+        applyCommonProperties(newSeriesApp, startMs, endMs, allDay);
+        if (rruleData.hasRule) {
+          try {
+            AppointmentRecurrence newRecurrence;
+            int64_t countRemaining = -1;
+            if (rruleData.count.has_value() && rruleData.count.value() > 0) {
+              countRemaining = rruleData.count.value() - occurrencesBefore;
+              if (countRemaining <= 0) countRemaining = 1;
+            }
+            buildRecurrenceRule(newRecurrence, countRemaining);
+            newSeriesApp.Recurrence(newRecurrence);
+          } catch (...) {}
+        }
+        co_await cal.SaveAppointmentAsync(newSeriesApp);
+
+        std::string newSeriesId = SafeGetEventId(newSeriesApp);
+        result->Success(flutter::EncodableValue(newSeriesId));
+        co_return;
+      }
+    }
+
+    // Case 2: Standard Create or Update Event
     Appointment appointment{nullptr};
     if (!eventId.empty()) {
       try {
@@ -907,110 +1258,55 @@ fire_and_forget DeviceCalendarPlugin::CreateOrUpdateEvent(
       } catch (...) {
         appointment = nullptr;
       }
+
+      if (appointment) {
+        std::string existingCalId = SafeGetEventCalendarId(appointment);
+        if (!existingCalId.empty() && existingCalId != calendarId) {
+          try {
+            auto oldCal = co_await store.GetAppointmentCalendarAsync(winrt::to_hstring(existingCalId));
+            if (oldCal) {
+              co_await oldCal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+            }
+          } catch (...) {}
+          appointment = Appointment();
+        }
+      } else {
+        // Event was not found directly in destination calendar `cal`. Check if it exists in another calendar (moved event).
+        try {
+          auto readStore = co_await GetAppointmentStoreForRead();
+          if (readStore) {
+            auto allCals = co_await readStore.FindAppointmentCalendarsAsync(FindAppointmentCalendarsOptions::IncludeHidden);
+            for (const auto& otherCal : allCals) {
+              std::string otherCalId = SafeGetCalendarId(otherCal);
+              if (!otherCalId.empty() && otherCalId != calendarId) {
+                try {
+                  auto writeOtherCal = co_await store.GetAppointmentCalendarAsync(winrt::to_hstring(otherCalId));
+                  if (writeOtherCal) {
+                    auto oldApp = co_await writeOtherCal.GetAppointmentAsync(winrt::to_hstring(eventId));
+                    if (oldApp) {
+                      co_await writeOtherCal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+                      break;
+                    }
+                  }
+                } catch (...) {}
+              }
+            }
+          }
+        } catch (...) {}
+        appointment = Appointment();
+      }
     }
     if (!appointment) {
       appointment = Appointment();
     }
 
-    appointment.Subject(winrt::to_hstring(title));
-    appointment.Details(winrt::to_hstring(description));
-    appointment.Location(winrt::to_hstring(location));
+    applyCommonProperties(appointment, startMs, endMs, allDay);
 
-    bool allDay = allDayOpt.value_or(false);
-    appointment.AllDay(allDay);
-
-    int64_t startMs = startMsOpt.value_or(0);
-    int64_t endMs = endMsOpt.value_or(startMs);
-
-    DateTime startDt = EpochMillisToDateTime(startMs);
-    appointment.StartTime(startDt);
-
-    if (endMs >= startMs) {
-      DateTime endDt = EpochMillisToDateTime(endMs);
-      appointment.Duration(endDt - startDt);
-    } else {
-      appointment.Duration(TimeSpan{0});
-    }
-
-    // Availability
-    if (availability == "FREE") {
-      appointment.BusyStatus(AppointmentBusyStatus::Free);
-    } else if (availability == "TENTATIVE") {
-      appointment.BusyStatus(AppointmentBusyStatus::Tentative);
-    } else if (availability == "UNAVAILABLE") {
-      appointment.BusyStatus(AppointmentBusyStatus::OutOfOffice);
-    } else {
-      appointment.BusyStatus(AppointmentBusyStatus::Busy);
-    }
-
-    // URL
-    if (!urlStr.empty()) {
-      try {
-        appointment.Uri(Uri(winrt::to_hstring(urlStr)));
-      } catch (...) {}
-    }
-
-    // Reminders (from pre-parsed data)
-    if (reminderMinutes.has_value()) {
-      try {
-        TimeSpan rem = std::chrono::duration_cast<TimeSpan>(std::chrono::minutes(reminderMinutes.value()));
-        appointment.Reminder(rem);
-      } catch (...) {}
-    }
-
-    // Recurrence Rule (from pre-parsed data)
     if (rruleData.hasRule) {
       try {
         AppointmentRecurrence recurrence;
-        if (rruleData.freq == "DAILY") recurrence.Unit(AppointmentRecurrenceUnit::Daily);
-        else if (rruleData.freq == "WEEKLY") recurrence.Unit(AppointmentRecurrenceUnit::Weekly);
-        else if (rruleData.freq == "MONTHLY") recurrence.Unit(AppointmentRecurrenceUnit::Monthly);
-        else if (rruleData.freq == "YEARLY") recurrence.Unit(AppointmentRecurrenceUnit::Yearly);
-
-        recurrence.Interval(static_cast<uint32_t>(rruleData.interval));
-
-        if (rruleData.count.has_value() && rruleData.count.value() > 0) {
-          recurrence.Occurrences(static_cast<uint32_t>(rruleData.count.value()));
-        }
-
-        if (!rruleData.until.empty()) {
-          recurrence.Until(ParseIso8601(rruleData.until));
-        }
-
-        AppointmentDaysOfWeek days = AppointmentDaysOfWeek::None;
-        for (const auto& dayStr : rruleData.byDay) {
-          if (dayStr == "SU") days |= AppointmentDaysOfWeek::Sunday;
-          else if (dayStr == "MO") days |= AppointmentDaysOfWeek::Monday;
-          else if (dayStr == "TU") days |= AppointmentDaysOfWeek::Tuesday;
-          else if (dayStr == "WE") days |= AppointmentDaysOfWeek::Wednesday;
-          else if (dayStr == "TH") days |= AppointmentDaysOfWeek::Thursday;
-          else if (dayStr == "FR") days |= AppointmentDaysOfWeek::Friday;
-          else if (dayStr == "SA") days |= AppointmentDaysOfWeek::Saturday;
-        }
-        if (days != AppointmentDaysOfWeek::None) {
-          recurrence.DaysOfWeek(days);
-        }
-
+        buildRecurrenceRule(recurrence);
         appointment.Recurrence(recurrence);
-      } catch (...) {}
-    }
-
-    // Attendees (from pre-parsed data)
-    if (hasAttendees) {
-      try {
-        appointment.Invitees().Clear();
-        for (const auto& ad : attendeesData) {
-          AppointmentInvitee invitee;
-          if (!ad.name.empty()) invitee.DisplayName(winrt::to_hstring(ad.name));
-          if (!ad.email.empty()) invitee.Address(winrt::to_hstring(ad.email));
-          if (ad.role.has_value()) {
-            int r = static_cast<int>(ad.role.value());
-            if (r == 1) invitee.Role(AppointmentParticipantRole::RequiredAttendee);
-            else if (r == 2) invitee.Role(AppointmentParticipantRole::OptionalAttendee);
-            else if (r == 3) invitee.Role(AppointmentParticipantRole::Resource);
-          }
-          appointment.Invitees().Append(invitee);
-        }
       } catch (...) {}
     }
 
@@ -1085,6 +1381,7 @@ fire_and_forget DeviceCalendarPlugin::DeleteEventInstance(
     std::string calendarId = GetStringValue(*args, "calendarId");
     std::string eventId = GetStringValue(*args, "eventId");
     auto startMsOpt = GetInt64Value(*args, "eventStartDate");
+    bool followingInstances = GetValue<bool>(*args, "followingInstances").value_or(false);
 
     auto store = co_await GetAppointmentStore();
     if (!store) {
@@ -1099,18 +1396,67 @@ fire_and_forget DeviceCalendarPlugin::DeleteEventInstance(
     }
 
     if (startMsOpt.has_value()) {
-      DateTime instanceDt = EpochMillisToDateTime(startMsOpt.value());
-      bool instanceDeleted = false;
-      try {
-        co_await cal.DeleteAppointmentInstanceAsync(winrt::to_hstring(eventId), instanceDt);
-        instanceDeleted = true;
-      } catch (...) {
-        instanceDeleted = false;
-      }
-      if (!instanceDeleted) {
+      if (followingInstances) {
+        Appointment masterApp{nullptr};
         try {
-          co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
-        } catch (...) {}
+          masterApp = co_await cal.GetAppointmentAsync(winrt::to_hstring(eventId));
+        } catch (...) {
+          masterApp = nullptr;
+        }
+
+        if (masterApp && masterApp.Recurrence()) {
+          int64_t occurrencesBefore = 0;
+          try {
+            FindAppointmentsOptions findOpts;
+            findOpts.IncludeHidden(true);
+            DateTime searchStart = masterApp.StartTime();
+            DateTime searchEnd = EpochMillisToDateTime(startMsOpt.value());
+            TimeSpan searchDur = searchEnd - searchStart;
+            if (searchDur.count() > 0) {
+              auto priorList = co_await cal.FindAppointmentsAsync(searchStart, searchDur, findOpts);
+              for (const auto& app : priorList) {
+                if (SafeGetEventId(app) == eventId) {
+                  if (DateTimeToEpochMillis(app.StartTime()) < startMsOpt.value()) {
+                    occurrencesBefore++;
+                  }
+                }
+              }
+            }
+          } catch (...) {}
+
+          if (occurrencesBefore == 0) {
+            try {
+              co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+            } catch (...) {}
+          } else {
+            if (masterApp.Recurrence().Occurrences()) {
+              masterApp.Recurrence().Occurrences(static_cast<uint32_t>(occurrencesBefore));
+            } else {
+              masterApp.Recurrence().Until(EpochMillisToDateTime(startMsOpt.value() - 1));
+            }
+            try {
+              co_await cal.SaveAppointmentAsync(masterApp);
+            } catch (...) {}
+          }
+        } else {
+          try {
+            co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+          } catch (...) {}
+        }
+      } else {
+        bool instanceDeleted = false;
+        DateTime instanceDt = EpochMillisToDateTime(startMsOpt.value());
+        try {
+          co_await cal.DeleteAppointmentInstanceAsync(winrt::to_hstring(eventId), instanceDt);
+          instanceDeleted = true;
+        } catch (...) {
+          instanceDeleted = false;
+        }
+        if (!instanceDeleted) {
+          try {
+            co_await cal.DeleteAppointmentAsync(winrt::to_hstring(eventId));
+          } catch (...) {}
+        }
       }
     } else {
       try {
