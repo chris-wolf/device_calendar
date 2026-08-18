@@ -331,6 +331,112 @@ void main() {
         print('LOG_TEST: Time update verification passed');
       });
 
+      test('2.6.1 Move Date Forward (+5 Days) and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Move from Sep 1 14:00 to Sep 6 14:00
+        final shiftedStart = event!.start!.add(const Duration(days: 5));
+        final shiftedEnd = event.end!.add(const Duration(days: 5));
+        event.start = shiftedStart;
+        event.end = shiftedEnd;
+
+        final updateResult = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(updateResult?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.start?.year, 2026);
+        expect(loaded?.start?.month, 9);
+        expect(loaded?.start?.day, 6);
+        expect(loaded?.start?.hour, 14);
+        expect(loaded?.end?.day, 6);
+        expect(loaded?.end?.hour, 15);
+        expect(loaded?.end?.minute, 30);
+        print('LOG_TEST: Forward date shift (+5 days) verification passed');
+      });
+
+      test('2.6.2 Move Date Backward Across Month Boundary (-12 Days to Aug 25) and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Move from Sep 6 to Aug 25 (12 days backward)
+        final shiftedStart = tz.TZDateTime(localLocation, 2026, 8, 25, 11, 0, 0);
+        final shiftedEnd = tz.TZDateTime(localLocation, 2026, 8, 25, 12, 30, 0);
+        event!.start = shiftedStart;
+        event.end = shiftedEnd;
+
+        final updateResult = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(updateResult?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.start?.year, 2026);
+        expect(loaded?.start?.month, 8);
+        expect(loaded?.start?.day, 25);
+        expect(loaded?.start?.hour, 11);
+        expect(loaded?.end?.month, 8);
+        expect(loaded?.end?.day, 25);
+        expect(loaded?.end?.hour, 12);
+        expect(loaded?.end?.minute, 30);
+        print('LOG_TEST: Cross-month backward date shift verification passed');
+      });
+
+      test('2.6.3 Move Date Across Year Boundary (Aug 2026 to Jan 2027) and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Move to Jan 5, 2027 10:00 - 11:30
+        final shiftedStart = tz.TZDateTime(localLocation, 2027, 1, 5, 10, 0, 0);
+        final shiftedEnd = tz.TZDateTime(localLocation, 2027, 1, 5, 11, 30, 0);
+        event!.start = shiftedStart;
+        event.end = shiftedEnd;
+
+        final updateResult = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(updateResult?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.start?.year, 2027);
+        expect(loaded?.start?.month, 1);
+        expect(loaded?.start?.day, 5);
+        expect(loaded?.start?.hour, 10);
+        expect(loaded?.end?.year, 2027);
+        expect(loaded?.end?.month, 1);
+        expect(loaded?.end?.day, 5);
+        expect(loaded?.end?.hour, 11);
+        expect(loaded?.end?.minute, 30);
+        print('LOG_TEST: Cross-year date shift verification passed');
+      });
+
+      test('2.6.4 Update Duration only (extend to 4 hours) and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Extend duration: Keep start at Jan 5 10:00, extend end to 14:00 (4 hrs)
+        final extendedEnd = event!.start!.add(const Duration(hours: 4));
+        event.end = extendedEnd;
+
+        final updateResult = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(updateResult?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.start?.day, 5);
+        expect(loaded?.start?.hour, 10);
+        expect(loaded?.end?.hour, 14);
+        expect(loaded?.end?.minute, 0);
+        print('LOG_TEST: Duration update verification passed');
+      });
+
       test('2.7 Update AllDay flag to true and back to false', () async {
         expect(normalEventId, isNotNull);
         final event = await loadEventFromDevice(calendarIdA, normalEventId);
@@ -359,6 +465,101 @@ void main() {
         expect(loaded2?.allDay, false);
         expect(loaded2?.start?.hour, 13);
         print('LOG_TEST: AllDay update verification passed');
+      });
+
+      test('2.7.1 All-Day Event Date Shift and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Set as allDay on Jan 10, 2027
+        final allDayStart = tz.TZDateTime(localLocation, 2027, 1, 10, 0, 0, 0);
+        final allDayEnd = tz.TZDateTime(localLocation, 2027, 1, 10, 23, 59, 59);
+        event!.allDay = true;
+        event.start = allDayStart;
+        event.end = allDayEnd;
+
+        final res1 = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(res1?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded1 = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded1?.allDay, true);
+        expect(loaded1?.start?.day, 10);
+        expect(loaded1?.start?.month, 1);
+        expect(loaded1?.start?.year, 2027);
+
+        // Shift allDay to Jan 15, 2027
+        final shiftedAllDayStart = tz.TZDateTime(localLocation, 2027, 1, 15, 0, 0, 0);
+        final shiftedAllDayEnd = tz.TZDateTime(localLocation, 2027, 1, 15, 23, 59, 59);
+        loaded1!.start = shiftedAllDayStart;
+        loaded1.end = shiftedAllDayEnd;
+
+        final res2 = await deviceCalendarPlugin.createOrUpdateEvent(loaded1);
+        expect(res2?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded2 = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded2?.allDay, true);
+        expect(loaded2?.start?.day, 15);
+        expect(loaded2?.start?.month, 1);
+        expect(loaded2?.start?.year, 2027);
+        print('LOG_TEST: All-Day date shift verification passed');
+      });
+
+      test('2.7.2 Multi-Day All-Day Date Range Modification and verify reload', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Multi-day allDay: Jan 20 to Jan 23
+        final multiStart = tz.TZDateTime(localLocation, 2027, 1, 20, 0, 0, 0);
+        final multiEnd = tz.TZDateTime(localLocation, 2027, 1, 23, 23, 59, 59);
+        event!.allDay = true;
+        event.start = multiStart;
+        event.end = multiEnd;
+
+        final res = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(res?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.allDay, true);
+        expect(loaded?.start?.day, 20);
+        expect(loaded?.end?.day, 23);
+        print('LOG_TEST: Multi-day all-day date modification verification passed');
+      });
+
+      test('2.7.3 Convert All-Day Event to Timed Event with new Date and Time', () async {
+        expect(normalEventId, isNotNull);
+        final event = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(event, isNotNull);
+
+        // Convert back to timed event on Jan 25, 2027 from 09:15 to 11:45
+        final timedStart = tz.TZDateTime(localLocation, 2027, 1, 25, 9, 15, 0);
+        final timedEnd = tz.TZDateTime(localLocation, 2027, 1, 25, 11, 45, 0);
+        event!.allDay = false;
+        event.start = timedStart;
+        event.end = timedEnd;
+
+        final res = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(res?.isSuccess, true);
+
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        final loaded = await loadEventFromDevice(calendarIdA, normalEventId);
+        expect(loaded?.allDay, false);
+        expect(loaded?.start?.year, 2027);
+        expect(loaded?.start?.month, 1);
+        expect(loaded?.start?.day, 25);
+        expect(loaded?.start?.hour, 9);
+        expect(loaded?.start?.minute, 15);
+        expect(loaded?.end?.hour, 11);
+        expect(loaded?.end?.minute, 45);
+        print('LOG_TEST: All-day to timed conversion with new date/time verification passed');
       });
 
       test('2.8 Update Availability and verify reload', () async {
@@ -501,7 +702,9 @@ void main() {
         final event = await loadEventFromDevice(calendarIdA, normalEventId);
         expect(event, isNotNull);
 
-        event!.calendarId = calendarIdB;
+        final currentStart = event!.start ?? baseDate;
+        final currentEnd = event.end ?? currentStart.add(const Duration(hours: 1));
+        event.calendarId = calendarIdB;
         final res = await deviceCalendarPlugin.createOrUpdateEvent(event);
         expect(res?.isSuccess, true);
         final movedEventId = res!.data!;
@@ -511,8 +714,8 @@ void main() {
         // Verify gone from Calendar A
         final listA = await loadInstancesFromDevice(
           calendarIdA,
-          startDate: baseDate.subtract(const Duration(days: 5)),
-          endDate: baseDate.add(const Duration(days: 5)),
+          startDate: currentStart.subtract(const Duration(days: 5)),
+          endDate: currentEnd.add(const Duration(days: 5)),
         );
         expect(listA.any((e) => e.eventId == normalEventId || e.eventId == movedEventId), false,
             reason: 'Moved event should no longer be in Calendar A');
@@ -520,8 +723,8 @@ void main() {
         // Verify present in Calendar B
         final listB = await loadInstancesFromDevice(
           calendarIdB,
-          startDate: baseDate.subtract(const Duration(days: 5)),
-          endDate: baseDate.add(const Duration(days: 5)),
+          startDate: currentStart.subtract(const Duration(days: 5)),
+          endDate: currentEnd.add(const Duration(days: 5)),
         );
         expect(listB.any((e) => e.eventId == movedEventId), true,
             reason: 'Moved event must exist in Calendar B');
@@ -538,8 +741,8 @@ void main() {
         await Future.delayed(const Duration(seconds: 1));
         final listBAfter = await loadInstancesFromDevice(
           calendarIdB,
-          startDate: baseDate.subtract(const Duration(days: 5)),
-          endDate: baseDate.add(const Duration(days: 5)),
+          startDate: currentStart.subtract(const Duration(days: 5)),
+          endDate: currentEnd.add(const Duration(days: 5)),
         );
         expect(listBAfter.any((e) => e.eventId == movedEventId), false,
             reason: 'Event should be deleted from Calendar B');
@@ -984,6 +1187,146 @@ void main() {
         print('LOG_TEST: Edit only this instance verified successfully');
 
         // Cleanup
+        await safeDeleteEvent(calendarIdA, eventId);
+      });
+
+      test('5.2 Move single instance to a different DAY (Shift Day 3 to Day 4) and verify reload', () async {
+        final event = Event(calendarIdA)
+          ..title = 'Recurring Day Shift Base'
+          ..start = seriesStart
+          ..end = seriesStart.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(
+            frequency: Frequency.daily,
+            count: 5,
+          );
+
+        final createRes = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(createRes?.isSuccess, true);
+        final eventId = createRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+
+        final instances = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: seriesStart.subtract(const Duration(days: 1)),
+          endDate: seriesStart.add(const Duration(days: 10)),
+          eventId: eventId,
+        );
+        expect(instances.length, 5);
+        instances.sort((a, b) => a.start!.compareTo(b.start!));
+
+        // Select 3rd instance (originally on Dec 3 at 10:00)
+        final targetInstance = instances[2];
+        final targetStartMs = targetInstance.start!.millisecondsSinceEpoch;
+        final targetEndMs = targetInstance.end!.millisecondsSinceEpoch;
+
+        // Shift this instance to Dec 4 at 15:00 (+1 day, +5 hours)
+        final updatedInstance = targetInstance;
+        updatedInstance.title = 'EXCEPTION - Shifted to Next Day';
+        updatedInstance.start = tz.TZDateTime(localLocation, 2026, 12, 4, 15, 0, 0);
+        updatedInstance.end = tz.TZDateTime(localLocation, 2026, 12, 4, 16, 0, 0);
+
+        final editRes = await deviceCalendarPlugin.createOrUpdateEvent(
+          updatedInstance,
+          instanceStartDate: targetStartMs,
+          instanceEndDate: targetEndMs,
+          updateFollowingInstances: false,
+        );
+        expect(editRes?.isSuccess, true);
+
+        await Future.delayed(const Duration(seconds: 2));
+
+        final afterInstances = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: seriesStart.subtract(const Duration(days: 1)),
+          endDate: seriesStart.add(const Duration(days: 10)),
+        );
+
+        final seriesAndException = afterInstances.where(
+          (e) => e.eventId == eventId || e.title == 'EXCEPTION - Shifted to Next Day',
+        ).toList();
+        expect(seriesAndException.length, 5, reason: 'Total count of instances must still be 5');
+
+        final exceptionList = seriesAndException.where((e) => e.title == 'EXCEPTION - Shifted to Next Day').toList();
+        expect(exceptionList.length, 1);
+        final exception = exceptionList.first;
+        expect(exception.start!.day, 4);
+        expect(exception.start!.hour, 15);
+        expect(exception.end!.hour, 16);
+
+        // Verify there is no instance left at Dec 3 10:00
+        final dec3Instances = seriesAndException.where((e) => e.start!.day == 3 && e.start!.hour == 10).toList();
+        expect(dec3Instances.isEmpty, true, reason: 'Original Dec 3 instance must be replaced/moved');
+
+        print('LOG_TEST: Single instance day shift verified successfully');
+        await safeDeleteEvent(calendarIdA, eventId);
+      });
+
+      test('5.3 Move single instance across month boundary (Dec 1 to Nov 28) and verify reload', () async {
+        final event = Event(calendarIdA)
+          ..title = 'Recurring Month Shift Base'
+          ..start = seriesStart
+          ..end = seriesStart.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(
+            frequency: Frequency.daily,
+            count: 5,
+          );
+
+        final createRes = await deviceCalendarPlugin.createOrUpdateEvent(event);
+        expect(createRes?.isSuccess, true);
+        final eventId = createRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+
+        final instances = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: seriesStart.subtract(const Duration(days: 5)),
+          endDate: seriesStart.add(const Duration(days: 10)),
+          eventId: eventId,
+        );
+        expect(instances.length, 5);
+        instances.sort((a, b) => a.start!.compareTo(b.start!));
+
+        // Select 1st instance (originally on Dec 1)
+        final targetInstance = instances.first;
+        final targetStartMs = targetInstance.start!.millisecondsSinceEpoch;
+        final targetEndMs = targetInstance.end!.millisecondsSinceEpoch;
+
+        // Shift backwards to Nov 28 at 14:00
+        final updatedInstance = targetInstance;
+        updatedInstance.title = 'EXCEPTION - Shifted to November';
+        updatedInstance.start = tz.TZDateTime(localLocation, 2026, 11, 28, 14, 0, 0);
+        updatedInstance.end = tz.TZDateTime(localLocation, 2026, 11, 28, 15, 0, 0);
+
+        final editRes = await deviceCalendarPlugin.createOrUpdateEvent(
+          updatedInstance,
+          instanceStartDate: targetStartMs,
+          instanceEndDate: targetEndMs,
+          updateFollowingInstances: false,
+        );
+        expect(editRes?.isSuccess, true);
+
+        await Future.delayed(const Duration(seconds: 2));
+
+        final afterInstances = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: seriesStart.subtract(const Duration(days: 5)),
+          endDate: seriesStart.add(const Duration(days: 10)),
+        );
+
+        final seriesAndException = afterInstances.where(
+          (e) => e.eventId == eventId || e.title == 'EXCEPTION - Shifted to November',
+        ).toList();
+        expect(seriesAndException.length, 5);
+
+        final exceptionList = seriesAndException.where((e) => e.title == 'EXCEPTION - Shifted to November').toList();
+        expect(exceptionList.length, 1);
+        final exception = exceptionList.first;
+        expect(exception.start!.month, 11);
+        expect(exception.start!.day, 28);
+        expect(exception.start!.hour, 14);
+
+        print('LOG_TEST: Single instance cross-month shift verified successfully');
         await safeDeleteEvent(calendarIdA, eventId);
       });
     });

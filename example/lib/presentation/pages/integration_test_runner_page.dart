@@ -448,6 +448,94 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _recordResult(suite2, '2.6 Update Start & End Times', false, 'Time update failed', e.toString());
       }
 
+      // 2.6.1 Move Date Forward (+5 Days)
+      setState(() => _currentStepName = '2.6.1 Moving date forward +5 days...');
+      _log('Step 2.6.1: Moving event date forward from Sep 1 to Sep 6...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        final shiftedStart = event!.start!.add(const Duration(days: 5));
+        final shiftedEnd = event.end!.add(const Duration(days: 5));
+        event.start = shiftedStart;
+        event.end = shiftedEnd;
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        _assert(updateRes?.isSuccess == true, 'Update date (+5 days) failed');
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded after +5 days shift: start=${loaded?.start}, end=${loaded?.end}');
+        _assert(loaded?.start?.day == 6 && loaded?.start?.month == 9 && loaded?.start?.year == 2026, 'Start date day/month/year not updated to Sep 6');
+        _assert(loaded?.end?.day == 6 && loaded?.end?.month == 9, 'End date not updated to Sep 6');
+        _recordResult(suite2, '2.6.1 Move Date Forward (+5 Days)', true, 'Shifted date to Sep 6 (day/month/year preserved correctly)');
+      } catch (e) {
+        _recordResult(suite2, '2.6.1 Move Date Forward (+5 Days)', false, 'Forward date shift failed', e.toString());
+      }
+
+      // 2.6.2 Move Date Backward Across Month Boundary (-12 Days to Aug 25)
+      setState(() => _currentStepName = '2.6.2 Moving date backward across month boundary...');
+      _log('Step 2.6.2: Moving event date backward to Aug 25 (cross-month)...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        final shiftedStart = tz.TZDateTime(localLoc, 2026, 8, 25, 11, 0, 0);
+        final shiftedEnd = tz.TZDateTime(localLoc, 2026, 8, 25, 12, 30, 0);
+        event!.start = shiftedStart;
+        event.end = shiftedEnd;
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        _assert(updateRes?.isSuccess == true, 'Update date to Aug 25 failed');
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded after cross-month shift: start=${loaded?.start}, end=${loaded?.end}');
+        _assert(loaded?.start?.month == 8 && loaded?.start?.day == 25 && loaded?.start?.hour == 11, 'Start date not updated to Aug 25 11:00');
+        _assert(loaded?.end?.month == 8 && loaded?.end?.day == 25 && loaded?.end?.hour == 12, 'End date not updated to Aug 25 12:30');
+        _recordResult(suite2, '2.6.2 Move Date Backward (Aug 25)', true, 'Shifted across month boundary to Aug 25');
+      } catch (e) {
+        _recordResult(suite2, '2.6.2 Move Date Backward (Aug 25)', false, 'Cross-month backward shift failed', e.toString());
+      }
+
+      // 2.6.3 Move Date Across Year Boundary (to Jan 5, 2027)
+      setState(() => _currentStepName = '2.6.3 Moving date across year boundary...');
+      _log('Step 2.6.3: Moving event date across year boundary to Jan 5, 2027...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        final shiftedStart = tz.TZDateTime(localLoc, 2027, 1, 5, 10, 0, 0);
+        final shiftedEnd = tz.TZDateTime(localLoc, 2027, 1, 5, 11, 30, 0);
+        event!.start = shiftedStart;
+        event.end = shiftedEnd;
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        _assert(updateRes?.isSuccess == true, 'Update date to Jan 2027 failed');
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded after year shift: start=${loaded?.start}, end=${loaded?.end}');
+        _assert(loaded?.start?.year == 2027 && loaded?.start?.month == 1 && loaded?.start?.day == 5, 'Year rollover failed');
+        _recordResult(suite2, '2.6.3 Move Date Across Year Boundary', true, 'Shifted across year boundary to Jan 5, 2027');
+      } catch (e) {
+        _recordResult(suite2, '2.6.3 Move Date Across Year Boundary', false, 'Cross-year shift failed', e.toString());
+      }
+
+      // 2.6.4 Update Duration Only (Extend to 4 Hours)
+      setState(() => _currentStepName = '2.6.4 Updating duration only...');
+      _log('Step 2.6.4: Extending duration to 4 hours without changing start date...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        final extendedEnd = event!.start!.add(const Duration(hours: 4));
+        event.end = extendedEnd;
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        _assert(updateRes?.isSuccess == true, 'Update duration failed');
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded after duration update: start=${loaded?.start}, end=${loaded?.end}');
+        _assert(loaded?.start?.day == 5 && loaded?.start?.hour == 10 && loaded?.end?.hour == 14, 'Duration did not update to 4 hours');
+        _recordResult(suite2, '2.6.4 Update Duration Only', true, 'Duration extended to 4 hours while preserving start time');
+      } catch (e) {
+        _recordResult(suite2, '2.6.4 Update Duration Only', false, 'Duration update failed', e.toString());
+      }
+
       // 2.7 Update All-Day Flag
       setState(() => _currentStepName = '2.7 Updating All-Day Flag...');
       _log('Step 2.7: Toggling allDay = true, saving, reloading, then toggling back to allDay = false...');
@@ -475,6 +563,74 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _recordResult(suite2, '2.7 Update All-Day Flag', true, 'Toggled allDay true and back to false');
       } catch (e) {
         _recordResult(suite2, '2.7 Update All-Day Flag', false, 'All-Day update failed', e.toString());
+      }
+
+      // 2.7.1 All-Day Event Date Shift
+      setState(() => _currentStepName = '2.7.1 Shifting All-Day Event Date...');
+      _log('Step 2.7.1: Moving allDay event to Jan 10 and then Jan 15, 2027...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        event!.allDay = true;
+        event.start = tz.TZDateTime(localLoc, 2027, 1, 10, 0, 0, 0);
+        event.end = tz.TZDateTime(localLoc, 2027, 1, 10, 23, 59, 59);
+        await _plugin.createOrUpdateEvent(event);
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        var loaded = await _loadEvent(calendarIdA, normalEventId);
+        _assert(loaded?.allDay == true && loaded?.start?.day == 10, 'All-Day Jan 10 shift failed');
+
+        loaded!.start = tz.TZDateTime(localLoc, 2027, 1, 15, 0, 0, 0);
+        loaded.end = tz.TZDateTime(localLoc, 2027, 1, 15, 23, 59, 59);
+        await _plugin.createOrUpdateEvent(loaded);
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded after all-day date shift: start=${loaded?.start}, allDay=${loaded?.allDay}');
+        _assert(loaded?.allDay == true && loaded?.start?.day == 15, 'All-Day Jan 15 shift failed');
+        _recordResult(suite2, '2.7.1 All-Day Date Shift', true, 'All-Day event successfully shifted across dates');
+      } catch (e) {
+        _recordResult(suite2, '2.7.1 All-Day Date Shift', false, 'All-Day date shift failed', e.toString());
+      }
+
+      // 2.7.2 Multi-Day All-Day Date Range Modification
+      setState(() => _currentStepName = '2.7.2 Modifying Multi-Day All-Day Date Range...');
+      _log('Step 2.7.2: Setting multi-day allDay event (Jan 20 to Jan 23)...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        event!.allDay = true;
+        event.start = tz.TZDateTime(localLoc, 2027, 1, 20, 0, 0, 0);
+        event.end = tz.TZDateTime(localLoc, 2027, 1, 23, 23, 59, 59);
+        await _plugin.createOrUpdateEvent(event);
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded multi-day all-day: start=${loaded?.start}, end=${loaded?.end}');
+        _assert(loaded?.allDay == true && loaded?.start?.day == 20 && loaded?.end?.day == 23, 'Multi-day allDay range mismatch');
+        _recordResult(suite2, '2.7.2 Multi-Day All-Day Range', true, 'Multi-day all-day event saved and reloaded');
+      } catch (e) {
+        _recordResult(suite2, '2.7.2 Multi-Day All-Day Range', false, 'Multi-day all-day failed', e.toString());
+      }
+
+      // 2.7.3 Convert All-Day Event to Timed Event with New Date & Time
+      setState(() => _currentStepName = '2.7.3 Converting All-Day to Timed with New Date & Time...');
+      _log('Step 2.7.3: Converting all-day event to timed event on Jan 25, 09:15 - 11:45...');
+      try {
+        final event = await _loadEvent(calendarIdA, normalEventId);
+        _assert(event != null, 'Event not found');
+        event!.allDay = false;
+        event.start = tz.TZDateTime(localLoc, 2027, 1, 25, 9, 15, 0);
+        event.end = tz.TZDateTime(localLoc, 2027, 1, 25, 11, 45, 0);
+        await _plugin.createOrUpdateEvent(event);
+
+        await Future.delayed(const Duration(milliseconds: 400));
+        final loaded = await _loadEvent(calendarIdA, normalEventId);
+        _log('Reloaded converted timed event: start=${loaded?.start}, end=${loaded?.end}, allDay=${loaded?.allDay}');
+        _assert(loaded?.allDay == false && loaded?.start?.day == 25 && loaded?.start?.hour == 9 && loaded?.start?.minute == 15, 'Conversion to timed event failed');
+        _recordResult(suite2, '2.7.3 Convert All-Day to Timed', true, 'Converted all-day event to timed event on Jan 25');
+      } catch (e) {
+        _recordResult(suite2, '2.7.3 Convert All-Day to Timed', false, 'All-Day to timed conversion failed', e.toString());
       }
 
       // 2.8 Update Availability
@@ -553,18 +709,20 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
       try {
         final event = await _loadEvent(calendarIdA, normalEventId);
         _assert(event != null, 'Event not found');
-        event!.calendarId = calendarIdB;
+        final currentStart = event!.start ?? baseDate;
+        final currentEnd = event.end ?? currentStart.add(const Duration(hours: 1));
+        event.calendarId = calendarIdB;
         final moveRes = await _plugin.createOrUpdateEvent(event);
         _assert(moveRes?.isSuccess == true && moveRes?.data != null, 'Failed to move event to Cal B');
         final movedEventId = moveRes!.data!;
         _log('Moved event. Returned ID: $movedEventId');
 
         await Future.delayed(const Duration(seconds: 1));
-        final listA = await _loadInstances(calendarIdA, startDate: baseDate.subtract(const Duration(days: 5)), endDate: baseDate.add(const Duration(days: 5)));
+        final listA = await _loadInstances(calendarIdA, startDate: currentStart.subtract(const Duration(days: 5)), endDate: currentEnd.add(const Duration(days: 5)));
         _log('Instances remaining in Cal A: ${listA.map((e) => e.title).toList()}');
         _assert(!listA.any((e) => e.eventId == normalEventId || e.eventId == movedEventId), 'Event still found in Cal A after move');
 
-        final listB = await _loadInstances(calendarIdB, startDate: baseDate.subtract(const Duration(days: 5)), endDate: baseDate.add(const Duration(days: 5)));
+        final listB = await _loadInstances(calendarIdB, startDate: currentStart.subtract(const Duration(days: 5)), endDate: currentEnd.add(const Duration(days: 5)));
         _log('Instances found in Cal B: ${listB.map((e) => '${e.title} (${e.eventId})').toList()}');
         _assert(listB.any((e) => e.eventId == movedEventId), 'Moved event not found in Cal B');
 
@@ -574,7 +732,7 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _assert(delRes.isSuccess && delRes.data == true, 'Failed to delete moved event from Cal B');
 
         await Future.delayed(const Duration(seconds: 1));
-        final listBAfter = await _loadInstances(calendarIdB, startDate: baseDate.subtract(const Duration(days: 5)), endDate: baseDate.add(const Duration(days: 5)));
+        final listBAfter = await _loadInstances(calendarIdB, startDate: currentStart.subtract(const Duration(days: 5)), endDate: currentEnd.add(const Duration(days: 5)));
         _log('Instances in Cal B after delete: ${listBAfter.length}');
         _assert(!listBAfter.any((e) => e.eventId == movedEventId), 'Event still exists after deletion');
 
@@ -793,6 +951,111 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _recordResult(suite5, '5.1 Edit Only This Instance', true, 'Single occurrence detached and modified without altering remaining 4 occurrences');
       } catch (e) {
         _recordResult(suite5, '5.1 Edit Only This Instance', false, 'Exception edit failed', e.toString());
+      }
+
+      // 5.2 Move Single Instance to a Different Day
+      setState(() => _currentStepName = '5.2 Testing Move Single Instance to Different Day...');
+      _log('Step 5.2: Moving 3rd instance to the NEXT DAY (Dec 3 -> Dec 4 at 15:00)...');
+      try {
+        final event = Event(calendarIdA)
+          ..title = 'Day Shift Base'
+          ..start = excStart
+          ..end = excStart.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+
+        final createRes = await _plugin.createOrUpdateEvent(event);
+        _assert(createRes?.isSuccess == true, 'Create base failed');
+        final eventId = createRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final instances = await _loadInstances(calendarIdA, startDate: excStart.subtract(const Duration(days: 1)), endDate: excStart.add(const Duration(days: 10)), eventId: eventId);
+        instances.sort((a, b) => a.start!.compareTo(b.start!));
+
+        final target = instances[2];
+        final targetStartMs = target.start!.millisecondsSinceEpoch;
+        final targetEndMs = target.end!.millisecondsSinceEpoch;
+
+        target.title = 'EXCEPTION - Next Day';
+        target.start = tz.TZDateTime(localLoc, 2026, 12, 4, 15, 0, 0);
+        target.end = tz.TZDateTime(localLoc, 2026, 12, 4, 16, 0, 0);
+
+        final editRes = await _plugin.createOrUpdateEvent(
+          target,
+          instanceStartDate: targetStartMs,
+          instanceEndDate: targetEndMs,
+          updateFollowingInstances: false,
+        );
+        _assert(editRes?.isSuccess == true, 'Edit day shift failed: ${editRes?.errors.map((e) => e.errorMessage)}');
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await _loadInstances(calendarIdA, startDate: excStart.subtract(const Duration(days: 1)), endDate: excStart.add(const Duration(days: 10)));
+        final allRelated = after.where((e) => e.eventId == eventId || e.title == 'EXCEPTION - Next Day').toList();
+        _assert(allRelated.length == 5, 'Total instances count must be 5');
+
+        final shifted = allRelated.firstWhere((e) => e.title == 'EXCEPTION - Next Day');
+        _assert(shifted.start!.day == 4 && shifted.start!.hour == 15, 'Shifted instance day/hour mismatch');
+
+        final dec3Slot = allRelated.where((e) => e.start!.day == 3 && e.start!.hour == 10).toList();
+        _assert(dec3Slot.isEmpty, 'Original Dec 3 instance still exists at old time');
+
+        await _safeDeleteEvent(calendarIdA, eventId);
+        if (shifted.eventId != null && shifted.eventId != eventId) {
+          await _safeDeleteEvent(calendarIdA, shifted.eventId);
+        }
+        _recordResult(suite5, '5.2 Move Instance to Different Day', true, 'Moved single instance to next day without affecting series');
+      } catch (e) {
+        _recordResult(suite5, '5.2 Move Instance to Different Day', false, 'Day shift failed', e.toString());
+      }
+
+      // 5.3 Move Single Instance Across Month Boundary
+      setState(() => _currentStepName = '5.3 Testing Move Single Instance Across Month Boundary...');
+      _log('Step 5.3: Moving 1st instance backwards from Dec 1 to Nov 28...');
+      try {
+        final event = Event(calendarIdA)
+          ..title = 'Month Shift Base'
+          ..start = excStart
+          ..end = excStart.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+
+        final createRes = await _plugin.createOrUpdateEvent(event);
+        _assert(createRes?.isSuccess == true, 'Create base failed');
+        final eventId = createRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final instances = await _loadInstances(calendarIdA, startDate: excStart.subtract(const Duration(days: 5)), endDate: excStart.add(const Duration(days: 10)), eventId: eventId);
+        instances.sort((a, b) => a.start!.compareTo(b.start!));
+
+        final target = instances.first;
+        final targetStartMs = target.start!.millisecondsSinceEpoch;
+        final targetEndMs = target.end!.millisecondsSinceEpoch;
+
+        target.title = 'EXCEPTION - In November';
+        target.start = tz.TZDateTime(localLoc, 2026, 11, 28, 14, 0, 0);
+        target.end = tz.TZDateTime(localLoc, 2026, 11, 28, 15, 0, 0);
+
+        final editRes = await _plugin.createOrUpdateEvent(
+          target,
+          instanceStartDate: targetStartMs,
+          instanceEndDate: targetEndMs,
+          updateFollowingInstances: false,
+        );
+        _assert(editRes?.isSuccess == true, 'Edit month shift failed');
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await _loadInstances(calendarIdA, startDate: excStart.subtract(const Duration(days: 5)), endDate: excStart.add(const Duration(days: 10)));
+        final allRelated = after.where((e) => e.eventId == eventId || e.title == 'EXCEPTION - In November').toList();
+        _assert(allRelated.length == 5, 'Total instances count must be 5');
+
+        final shifted = allRelated.firstWhere((e) => e.title == 'EXCEPTION - In November');
+        _assert(shifted.start!.month == 11 && shifted.start!.day == 28 && shifted.start!.hour == 14, 'Month shift date mismatch');
+
+        await _safeDeleteEvent(calendarIdA, eventId);
+        if (shifted.eventId != null && shifted.eventId != eventId) {
+          await _safeDeleteEvent(calendarIdA, shifted.eventId);
+        }
+        _recordResult(suite5, '5.3 Move Instance Across Month', true, 'Moved single instance to previous month successfully');
+      } catch (e) {
+        _recordResult(suite5, '5.3 Move Instance Across Month', false, 'Month shift failed', e.toString());
       }
 
       // =======================================================================
