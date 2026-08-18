@@ -162,6 +162,31 @@ void main() {
     expect(result?.data, fakeNewEventId);
   });
 
+  test('UpdateRecurringInstance_PassesInstanceArguments', () async {
+    const fakeCalendarId = 'fakeCalendarId';
+    const fakeEventId = 'fakeEventId';
+    const instanceStartDate = 1700000000000;
+    const instanceEndDate = 1700000360000;
+    final event = Event(fakeCalendarId)
+      ..eventId = fakeEventId
+      ..title = 'Updated instance'
+      ..start = TZDateTime.fromMillisecondsSinceEpoch(local, instanceStartDate)
+      ..end = TZDateTime.fromMillisecondsSinceEpoch(local, instanceEndDate);
+
+    await deviceCalendarPlugin.createOrUpdateEvent(
+      event,
+      instanceStartDate: instanceStartDate,
+      instanceEndDate: instanceEndDate,
+      updateFollowingInstances: false,
+    );
+
+    final arguments = log.single.arguments as Map<dynamic, dynamic>;
+    expect(log.single.method, 'createOrUpdateEvent');
+    expect(arguments['instanceStartDate'], instanceStartDate);
+    expect(arguments['instanceEndDate'], instanceEndDate);
+    expect(arguments['updateFollowingInstances'], false);
+  });
+
   test('Attendee_Serialises_Correctly', () async {
     final attendee = Attendee(
         name: 'Test Attendee',

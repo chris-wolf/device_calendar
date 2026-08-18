@@ -153,6 +153,9 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
     let availabilityArgument = "availability"
     let attendanceStatusArgument = "attendanceStatus"
     let eventStatusArgument = "eventStatus"
+    let instanceStartDateArgument = "instanceStartDate"
+    let instanceEndDateArgument = "instanceEndDate"
+    let updateFollowingInstancesArgument = "updateFollowingInstances"
     let validFrequencyTypes = [EKRecurrenceFrequency.daily, EKRecurrenceFrequency.weekly, EKRecurrenceFrequency.monthly, EKRecurrenceFrequency.yearly]
     
     var flutterResult : FlutterResult?
@@ -836,21 +839,83 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         }
     }
 
+    // Resolve the requested occurrence from its start time before applying an
+    // EventKit span. Some stores return the series master for an identifier.
+    private func recurringInstance(
+        eventId: String,
+        calendar: EKCalendar,
+        instanceStartDate: Date,
+        instanceEndDate: Date
+    ) -> EKEvent? {
+        let sourceEvent = eventStore.event(withIdentifier: eventId)
+        let searchEnd = max(instanceEndDate, instanceStartDate).addingTimeInterval(1)
+        let searchStart = instanceStartDate.addingTimeInterval(-1)
+        let predicate = eventStore.predicateForEvents(
+            withStart: searchStart,
+            end: searchEnd,
+            calendars: [calendar]
+        )
+
+        return eventStore.events(matching: predicate).first { candidate in
+            guard let occurrenceStart = candidate.occurrenceDate ?? candidate.startDate else {
+                return false
+            }
+            let matchesRequestedOccurrence =
+                abs(occurrenceStart.timeIntervalSince(instanceStartDate)) < 1
+            let matchesSeries =
+                candidate.eventIdentifier == eventId ||
+                (sourceEvent?.calendarItemIdentifier != nil &&
+                    candidate.calendarItemIdentifier == sourceEvent?.calendarItemIdentifier)
+            return matchesRequestedOccurrence && matchesSeries
+        }
+    }
+
+    private func applyEventArguments(
+        _ arguments: [String : AnyObject],
+        to ekEvent: EKEvent,
+        calendar: EKCalendar
+    ) {
+        let isAllDay = (arguments[eventAllDayArgument] as? Bool) ?? false
+        let startDateMillisecondsSinceEpoch = arguments[eventStartDateArgument] as! NSNumber
+        let endDateMillisecondsSinceEpoch = arguments[eventEndDateArgument] as! NSNumber
+        let startDate = Date(timeIntervalSince1970: startDateMillisecondsSinceEpoch.doubleValue / 1000.0)
+        let endDate = Date(timeIntervalSince1970: endDateMillisecondsSinceEpoch.doubleValue / 1000.0)
+        let startTimeZoneString = arguments[eventStartTimeZoneArgument] as? String
+        let title = arguments[eventTitleArgument] as? String
+        let description = arguments[eventDescriptionArgument] as? String
+        let location = arguments[eventLocationArgument] as? String
+        let url = arguments[eventURLArgument] as? String
+
+        ekEvent.title = title ?? ""
+        ekEvent.notes = description
+        ekEvent.isAllDay = isAllDay
+        ekEvent.startDate = startDate
+        ekEvent.endDate = endDate
+
+        if !isAllDay {
+            ekEvent.timeZone =
+                TimeZone(identifier: startTimeZoneString ?? TimeZone.current.identifier) ?? .current
+        }
+
+        ekEvent.calendar = calendar
+        ekEvent.location = location
+        ekEvent.url = url.flatMap { $0.isEmpty ? nil : URL(string: $0) }
+        setAttendees(arguments, ekEvent)
+        ekEvent.alarms = createReminders(arguments)
+
+        if let availability = setAvailability(arguments) {
+            ekEvent.availability = availability
+        }
+    }
+
     private func createOrUpdateEvent(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
         checkPermissionsThenExecute(permissionsGrantedAction: {
             let arguments = call.arguments as! Dictionary<String, AnyObject>
             let calendarId = arguments[calendarIdArgument] as! String
             let eventId = arguments[eventIdArgument] as? String
-            let isAllDay = (arguments[eventAllDayArgument] as? Bool) ?? false
-            let startDateMillisecondsSinceEpoch = arguments[eventStartDateArgument] as! NSNumber
-            let endDateDateMillisecondsSinceEpoch = arguments[eventEndDateArgument] as! NSNumber
-            let startDate = Date (timeIntervalSince1970: startDateMillisecondsSinceEpoch.doubleValue / 1000.0)
-            let endDate = Date (timeIntervalSince1970: endDateDateMillisecondsSinceEpoch.doubleValue / 1000.0)
-            let startTimeZoneString = arguments[eventStartTimeZoneArgument] as? String
-            let title = arguments[self.eventTitleArgument] as? String
-            let description = arguments[self.eventDescriptionArgument] as? String
-            let location = arguments[self.eventLocationArgument] as? String
-            let url = arguments[self.eventURLArgument] as? String
+            let instanceStartDate = arguments[instanceStartDateArgument] as? NSNumber
+            let instanceEndDate = arguments[instanceEndDateArgument] as? NSNumber
+            let updateFollowingInstances = arguments[updateFollowingInstancesArgument] as? Bool
             let ekCalendar = self.eventStore.calendar(withIdentifier: calendarId)
             if (ekCalendar == nil) {
                 self.finishWithCalendarNotFoundError(result: result, calendarId: calendarId)
@@ -862,51 +927,53 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
                 return
             }
 
-            var ekEvent: EKEvent?
-            if eventId == nil {
-                ekEvent = EKEvent.init(eventStore: self.eventStore)
-            } else {
-                ekEvent = self.eventStore.event(withIdentifier: eventId!)
-                if(ekEvent == nil) {
-                    self.finishWithEventNotFoundError(result: result, eventId: eventId!)
+            do {
+                if let eventId = eventId,
+                   let instanceStartDate = instanceStartDate,
+                   let instanceEndDate = instanceEndDate,
+                   let updateFollowingInstances = updateFollowingInstances {
+                    let originalStart = Date(timeIntervalSince1970: instanceStartDate.doubleValue / 1000.0)
+                    let originalEnd = Date(timeIntervalSince1970: instanceEndDate.doubleValue / 1000.0)
+                    guard let occurrence = self.recurringInstance(
+                        eventId: eventId,
+                        calendar: ekCalendar!,
+                        instanceStartDate: originalStart,
+                        instanceEndDate: originalEnd
+                    ) else {
+                        self.finishWithEventNotFoundError(result: result, eventId: eventId)
+                        return
+                    }
+
+                    self.applyEventArguments(arguments, to: occurrence, calendar: ekCalendar!)
+
+                    if updateFollowingInstances {
+                        // EventKit performs the series split and keeps the original
+                        // recurrence end/count for the newly-created future series.
+                        try self.eventStore.save(occurrence, span: .futureEvents)
+                    } else {
+                        // A detached occurrence must not carry the master's RRULE.
+                        occurrence.recurrenceRules = nil
+                        try self.eventStore.save(occurrence, span: .thisEvent)
+                    }
+                    result(occurrence.eventIdentifier)
                     return
                 }
-            }
 
-            ekEvent!.title = title ?? ""
-            ekEvent!.notes = description
-            ekEvent!.isAllDay = isAllDay
-            ekEvent!.startDate = startDate
-            ekEvent!.endDate = endDate
+                let ekEvent: EKEvent
+                if let eventId = eventId {
+                    guard let existingEvent = self.eventStore.event(withIdentifier: eventId) else {
+                        self.finishWithEventNotFoundError(result: result, eventId: eventId)
+                        return
+                    }
+                    ekEvent = existingEvent
+                } else {
+                    ekEvent = EKEvent(eventStore: self.eventStore)
+                }
 
-            if (!isAllDay) {
-                let timeZone = TimeZone(identifier: startTimeZoneString ?? TimeZone.current.identifier) ?? .current
-                ekEvent!.timeZone = timeZone
-            }
-
-            ekEvent!.calendar = ekCalendar!
-            ekEvent!.location = location
-
-            // Create and add URL object only when if the input string is not empty or nil
-            if let urlCheck = url, !urlCheck.isEmpty {
-                let iosUrl = URL(string: url ?? "")
-                ekEvent!.url = iosUrl
-            }
-            else {
-                ekEvent!.url = nil
-            }
-
-            ekEvent!.recurrenceRules = createEKRecurrenceRules(arguments)
-            setAttendees(arguments, ekEvent)
-            ekEvent!.alarms = createReminders(arguments)
-
-            if let availability = setAvailability(arguments) {
-                ekEvent!.availability = availability
-            }
-
-            do {
-                try self.eventStore.save(ekEvent!, span: .futureEvents)
-                result(ekEvent!.eventIdentifier)
+                self.applyEventArguments(arguments, to: ekEvent, calendar: ekCalendar!)
+                ekEvent.recurrenceRules = self.createEKRecurrenceRules(arguments)
+                try self.eventStore.save(ekEvent, span: .futureEvents)
+                result(ekEvent.eventIdentifier)
             } catch {
                 self.eventStore.reset()
                 result(FlutterError(code: self.genericError, message: error.localizedDescription, details: nil))
