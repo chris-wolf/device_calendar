@@ -27,6 +27,8 @@ flutter:
       macos:
         pluginClass: DeviceCalendarPlugin
         sharedDarwinSource: true
+      windows:
+        pluginClass: DeviceCalendarPluginCApi
 
 environment:
   sdk: ^3.0.0
