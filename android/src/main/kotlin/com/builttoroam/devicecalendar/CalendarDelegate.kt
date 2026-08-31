@@ -386,10 +386,10 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                 return
             }
 
-            val contentResolver: ContentResolver? = _context?.contentResolver
+            val safeEndDate = endDate ?: 4102444800000L // Jan 1, 2100 00:00:00 UTC, safely fits in Julian Day calculations without integer overflow
             val eventsUriBuilder = CalendarContract.Instances.CONTENT_URI.buildUpon()
-            ContentUris.appendId(eventsUriBuilder, startDate ?: Date(0).time)
-            ContentUris.appendId(eventsUriBuilder, endDate ?: Date(Long.MAX_VALUE).time)
+            ContentUris.appendId(eventsUriBuilder, startDate ?: 0L)
+            ContentUris.appendId(eventsUriBuilder, safeEndDate)
 
             val eventsUri = eventsUriBuilder.build()
             val eventsCalendarQuery = "(${Events.CALENDAR_ID} = $calendarId)"
@@ -424,12 +424,21 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     val event = parseEvent(calendarId, eventsCursor) ?: continue
                     events.add(event)
                 }
+                val attendeesCache = mutableMapOf<String, List<Attendee>>()
+                val remindersCache = mutableMapOf<String, List<Reminder>>()
                 for (event in events) {
-                    val attendees = retrieveAttendees(calendar, event.eventId!!, contentResolver)
-                    event.organizer =
-                        attendees.firstOrNull { it.isOrganizer != null && it.isOrganizer }
-                    event.attendees = attendees
-                    event.reminders = retrieveReminders(event.eventId!!, contentResolver)
+                    val eventId = event.eventId
+                    if (eventId != null) {
+                        val attendees = attendeesCache.getOrPut(eventId) {
+                            retrieveAttendees(calendar, eventId, contentResolver)
+                        }
+                        event.organizer =
+                            attendees.firstOrNull { it.isOrganizer != null && it.isOrganizer }
+                        event.attendees = attendees
+                        event.reminders = remindersCache.getOrPut(eventId) {
+                            retrieveReminders(eventId, contentResolver)
+                        }
+                    }
                 }
             }.invokeOnCompletion { cause ->
                 eventsCursor?.close()
@@ -1335,18 +1344,54 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         }
     }
 
+    private fun getColumnString(cursor: Cursor, columnName: String, fallbackIndex: Int = -1): String? {
+        val index = cursor.getColumnIndex(columnName)
+        val effectiveIndex = if (index >= 0) index else fallbackIndex
+        return if (effectiveIndex >= 0 && !cursor.isNull(effectiveIndex)) {
+            try {
+                cursor.getString(effectiveIndex)
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+    }
+
+    private fun getColumnLong(cursor: Cursor, columnName: String, fallbackIndex: Int = -1, default: Long = 0L): Long {
+        val index = cursor.getColumnIndex(columnName)
+        val effectiveIndex = if (index >= 0) index else fallbackIndex
+        return if (effectiveIndex >= 0 && !cursor.isNull(effectiveIndex)) {
+            try {
+                cursor.getLong(effectiveIndex)
+            } catch (e: Exception) {
+                default
+            }
+        } else default
+    }
+
+    private fun getColumnInt(cursor: Cursor, columnName: String, fallbackIndex: Int = -1, default: Int = 0): Int {
+        val index = cursor.getColumnIndex(columnName)
+        val effectiveIndex = if (index >= 0) index else fallbackIndex
+        return if (effectiveIndex >= 0 && !cursor.isNull(effectiveIndex)) {
+            try {
+                cursor.getInt(effectiveIndex)
+            } catch (e: Exception) {
+                default
+            }
+        } else default
+    }
+
     private fun parseCalendarRow(cursor: Cursor?): Calendar? {
         if (cursor == null) {
             return null
         }
 
-        val calId = cursor.getLong(Cst.CALENDAR_PROJECTION_ID_INDEX)
-        val displayName = cursor.getString(Cst.CALENDAR_PROJECTION_DISPLAY_NAME_INDEX)
-        val accessLevel = cursor.getInt(Cst.CALENDAR_PROJECTION_ACCESS_LEVEL_INDEX)
-        val calendarColor = cursor.getInt(Cst.CALENDAR_PROJECTION_COLOR_INDEX)
-        val accountName = cursor.getString(Cst.CALENDAR_PROJECTION_ACCOUNT_NAME_INDEX)
-        val accountType = cursor.getString(Cst.CALENDAR_PROJECTION_ACCOUNT_TYPE_INDEX)
-        val ownerAccount = cursor.getString(Cst.CALENDAR_PROJECTION_OWNER_ACCOUNT_INDEX)
+        val calId = getColumnLong(cursor, CalendarContract.Calendars._ID, Cst.CALENDAR_PROJECTION_ID_INDEX)
+        val displayName = getColumnString(cursor, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, Cst.CALENDAR_PROJECTION_DISPLAY_NAME_INDEX) ?: ""
+        val accessLevel = getColumnInt(cursor, CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, Cst.CALENDAR_PROJECTION_ACCESS_LEVEL_INDEX)
+        val calendarColor = getColumnInt(cursor, CalendarContract.Calendars.CALENDAR_COLOR, Cst.CALENDAR_PROJECTION_COLOR_INDEX)
+        val accountName = getColumnString(cursor, CalendarContract.Calendars.ACCOUNT_NAME, Cst.CALENDAR_PROJECTION_ACCOUNT_NAME_INDEX) ?: ""
+        val accountType = getColumnString(cursor, CalendarContract.Calendars.ACCOUNT_TYPE, Cst.CALENDAR_PROJECTION_ACCOUNT_TYPE_INDEX) ?: ""
+        val ownerAccount = getColumnString(cursor, CalendarContract.Calendars.OWNER_ACCOUNT, Cst.CALENDAR_PROJECTION_OWNER_ACCOUNT_INDEX) ?: ""
 
         val calendar = Calendar(
             calId.toString(),
@@ -1359,7 +1404,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
 
         calendar.isReadOnly = isCalendarReadOnly(accessLevel)
         if (atLeastAPI(17)) {
-            val isPrimary = cursor.getString(Cst.CALENDAR_PROJECTION_IS_PRIMARY_INDEX)
+            val isPrimary = getColumnString(cursor, CalendarContract.Calendars.IS_PRIMARY, Cst.CALENDAR_PROJECTION_IS_PRIMARY_INDEX)
             calendar.isDefault = isPrimary == "1"
         } else {
             calendar.isDefault = false
@@ -1371,21 +1416,21 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
         if (cursor == null) {
             return null
         }
-        val eventId = cursor.getLong(Cst.EVENT_PROJECTION_ID_INDEX)
-        val title = cursor.getString(Cst.EVENT_PROJECTION_TITLE_INDEX)
-        val description = cursor.getString(Cst.EVENT_PROJECTION_DESCRIPTION_INDEX)
-        val begin = cursor.getLong(Cst.EVENT_PROJECTION_BEGIN_INDEX)
-        val end = cursor.getLong(Cst.EVENT_PROJECTION_END_INDEX)
-        val recurringRule = cursor.getString(Cst.EVENT_PROJECTION_RECURRING_RULE_INDEX)
-        val allDay = cursor.getInt(Cst.EVENT_PROJECTION_ALL_DAY_INDEX) > 0
-        val location = cursor.getString(Cst.EVENT_PROJECTION_EVENT_LOCATION_INDEX)
-        val url = cursor.getString(Cst.EVENT_PROJECTION_CUSTOM_APP_URI_INDEX)
-        val startTimeZone = cursor.getString(Cst.EVENT_PROJECTION_START_TIMEZONE_INDEX)
-        val endTimeZone = cursor.getString(Cst.EVENT_PROJECTION_END_TIMEZONE_INDEX)
-        val availability = parseAvailability(cursor.getInt(Cst.EVENT_PROJECTION_AVAILABILITY_INDEX))
-        val eventStatus = parseEventStatus(cursor.getInt(Cst.EVENT_PROJECTION_STATUS_INDEX))
-        val eventColor = cursor.getInt(Cst.EVENT_PROJECTION_EVENT_COLOR_INDEX)
-        val eventColorKey = cursor.getInt(Cst.EVENT_PROJECTION_EVENT_COLOR_KEY_INDEX)
+        val eventId = getColumnLong(cursor, CalendarContract.Instances.EVENT_ID, Cst.EVENT_PROJECTION_ID_INDEX)
+        val title = getColumnString(cursor, Events.TITLE, Cst.EVENT_PROJECTION_TITLE_INDEX)
+        val description = getColumnString(cursor, Events.DESCRIPTION, Cst.EVENT_PROJECTION_DESCRIPTION_INDEX)
+        val begin = getColumnLong(cursor, CalendarContract.Instances.BEGIN, Cst.EVENT_PROJECTION_BEGIN_INDEX)
+        val end = getColumnLong(cursor, CalendarContract.Instances.END, Cst.EVENT_PROJECTION_END_INDEX)
+        val recurringRule = getColumnString(cursor, Events.RRULE, Cst.EVENT_PROJECTION_RECURRING_RULE_INDEX)
+        val allDay = getColumnInt(cursor, Events.ALL_DAY, Cst.EVENT_PROJECTION_ALL_DAY_INDEX) > 0
+        val location = getColumnString(cursor, Events.EVENT_LOCATION, Cst.EVENT_PROJECTION_EVENT_LOCATION_INDEX)
+        val url = getColumnString(cursor, Events.CUSTOM_APP_URI, Cst.EVENT_PROJECTION_CUSTOM_APP_URI_INDEX)
+        val startTimeZone = getColumnString(cursor, Events.EVENT_TIMEZONE, Cst.EVENT_PROJECTION_START_TIMEZONE_INDEX)
+        val endTimeZone = getColumnString(cursor, Events.EVENT_END_TIMEZONE, Cst.EVENT_PROJECTION_END_TIMEZONE_INDEX)
+        val availability = parseAvailability(getColumnInt(cursor, Events.AVAILABILITY, Cst.EVENT_PROJECTION_AVAILABILITY_INDEX))
+        val eventStatus = parseEventStatus(getColumnInt(cursor, Events.STATUS, Cst.EVENT_PROJECTION_STATUS_INDEX))
+        val eventColor = getColumnInt(cursor, Events.EVENT_COLOR, Cst.EVENT_PROJECTION_EVENT_COLOR_INDEX)
+        val eventColorKey = getColumnInt(cursor, Events.EVENT_COLOR_KEY, Cst.EVENT_PROJECTION_EVENT_COLOR_KEY_INDEX)
         val event = Event()
         event.eventTitle = title ?: "New Event"
         event.eventId = eventId.toString()
@@ -1491,14 +1536,14 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             return null
         }
 
-        val emailAddress = cursor.getString(Cst.ATTENDEE_EMAIL_INDEX)
+        val emailAddress = getColumnString(cursor, CalendarContract.Attendees.ATTENDEE_EMAIL, Cst.ATTENDEE_EMAIL_INDEX) ?: return null
 
         return Attendee(
             emailAddress,
-            cursor.getString(Cst.ATTENDEE_NAME_INDEX),
-            cursor.getInt(Cst.ATTENDEE_TYPE_INDEX),
-            cursor.getInt(Cst.ATTENDEE_STATUS_INDEX),
-            cursor.getInt(Cst.ATTENDEE_RELATIONSHIP_INDEX) == CalendarContract.Attendees.RELATIONSHIP_ORGANIZER,
+            getColumnString(cursor, CalendarContract.Attendees.ATTENDEE_NAME, Cst.ATTENDEE_NAME_INDEX),
+            getColumnInt(cursor, CalendarContract.Attendees.ATTENDEE_TYPE, Cst.ATTENDEE_TYPE_INDEX),
+            getColumnInt(cursor, CalendarContract.Attendees.ATTENDEE_STATUS, Cst.ATTENDEE_STATUS_INDEX),
+            getColumnInt(cursor, CalendarContract.Attendees.ATTENDEE_RELATIONSHIP, Cst.ATTENDEE_RELATIONSHIP_INDEX) == CalendarContract.Attendees.RELATIONSHIP_ORGANIZER,
             emailAddress == calendar.ownerAccount
         )
     }
@@ -1508,7 +1553,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             return null
         }
 
-        return Reminder(cursor.getInt(Cst.REMINDER_MINUTES_INDEX))
+        return Reminder(getColumnInt(cursor, CalendarContract.Reminders.MINUTES, Cst.REMINDER_MINUTES_INDEX))
     }
 
     private fun isCalendarReadOnly(accessLevel: Int): Boolean {
