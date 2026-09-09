@@ -161,25 +161,38 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
     @SuppressLint("MissingPermission")
     fun retrieveCalendars(pendingChannelResult: MethodChannel.Result) {
         if (arePermissionsGranted()) {
-            val contentResolver: ContentResolver? = _context?.contentResolver
-            val uri: Uri = CalendarContract.Calendars.CONTENT_URI
-            val cursor: Cursor? = if (atLeastAPI(17)) {
-                contentResolver?.query(uri, Cst.CALENDAR_PROJECTION, null, null, null)
-            } else {
-                contentResolver?.query(uri, Cst.CALENDAR_PROJECTION_OLDER_API, null, null, null)
-            }
-            val calendars: MutableList<Calendar> = mutableListOf()
-            try {
-                while (cursor?.moveToNext() == true) {
-                    val calendar = parseCalendarRow(cursor) ?: continue
-                    calendars.add(calendar)
+            val exceptionHandler = CoroutineExceptionHandler { _, exception ->
+                uiThreadHandler.post {
+                    finishWithError(EC.GENERIC_ERROR, exception.message, pendingChannelResult)
                 }
+            }
 
-                finishWithSuccess(_gson?.toJson(calendars), pendingChannelResult)
-            } catch (e: Exception) {
-                finishWithError(EC.GENERIC_ERROR, e.message, pendingChannelResult)
-            } finally {
-                cursor?.close()
+            GlobalScope.launch(Dispatchers.IO + exceptionHandler) {
+                val contentResolver: ContentResolver? = _context?.contentResolver
+                val uri: Uri = CalendarContract.Calendars.CONTENT_URI
+                val cursor: Cursor? = if (atLeastAPI(17)) {
+                    contentResolver?.query(uri, Cst.CALENDAR_PROJECTION, null, null, null)
+                } else {
+                    contentResolver?.query(uri, Cst.CALENDAR_PROJECTION_OLDER_API, null, null, null)
+                }
+                val calendars: MutableList<Calendar> = mutableListOf()
+                try {
+                    while (cursor?.moveToNext() == true) {
+                        val calendar = parseCalendarRow(cursor) ?: continue
+                        calendars.add(calendar)
+                    }
+
+                    val json = _gson?.toJson(calendars)
+                    uiThreadHandler.post {
+                        finishWithSuccess(json, pendingChannelResult)
+                    }
+                } catch (e: Exception) {
+                    uiThreadHandler.post {
+                        finishWithError(EC.GENERIC_ERROR, e.message, pendingChannelResult)
+                    }
+                } finally {
+                    cursor?.close()
+                }
             }
         } else {
             val parameters = CalendarMethodsParametersCacheModel(
