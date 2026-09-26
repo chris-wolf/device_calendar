@@ -1743,6 +1743,147 @@ void main() {
         expect(finalEvents.any((e) => e.eventId == normalId), false);
         print('LOG_TEST: Delete all and neighbor safety verified');
       });
+
+      test('7.4 Delete single instance with concurrent overlapping event & non-existent ID safety (crash regression)', () async {
+        final start = baseStart.add(const Duration(days: 30));
+        final recEvent = Event(calendarIdA)
+          ..title = 'Recurring For Overlap Deletion'
+          ..start = start
+          ..end = start.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+        final recRes = await deviceCalendarPlugin.createOrUpdateEvent(recEvent);
+        expect(recRes?.isSuccess, true);
+        final recId = recRes!.data!;
+
+        final targetStart = start.add(const Duration(days: 2));
+        final targetEnd = targetStart.add(const Duration(hours: 1));
+        final overlapEvent = Event(calendarIdA)
+          ..title = 'Concurrent Overlapping Event'
+          ..start = targetStart
+          ..end = targetEnd;
+        final overlapRes = await deviceCalendarPlugin.createOrUpdateEvent(overlapEvent);
+        expect(overlapRes?.isSuccess, true);
+        final overlapId = overlapRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final initialEvents = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: start.subtract(const Duration(days: 1)),
+          endDate: start.add(const Duration(days: 10)),
+          eventId: recId,
+        );
+        initialEvents.sort((a, b) => a.start!.compareTo(b.start!));
+        final target = initialEvents[2];
+
+        // Safe failure: Non-matching ID during overlapping window must fail gracefully without nil force-unwrap crash
+        Result<bool>? invalidDel;
+        try {
+          invalidDel = await deviceCalendarPlugin.deleteEventInstance(
+            calendarIdA,
+            'non_existent_id_for_crash_test',
+            target.start!.millisecondsSinceEpoch,
+            target.end!.millisecondsSinceEpoch,
+            false,
+          );
+        } catch (_) {}
+        expect(invalidDel == null || invalidDel.isSuccess == false || invalidDel.data != true, true);
+
+        // Delete using target.eventId (loaded occurrence ID)
+        final delRes = await deviceCalendarPlugin.deleteEventInstance(
+          calendarIdA,
+          target.eventId ?? recId,
+          target.start!.millisecondsSinceEpoch,
+          target.end!.millisecondsSinceEpoch,
+          false,
+        );
+        expect(delRes.isSuccess, true);
+        expect(delRes.data, true);
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: start.subtract(const Duration(days: 1)),
+          endDate: start.add(const Duration(days: 10)),
+          eventId: recId,
+        );
+        expect(after.length, 4);
+        expect(after.any((e) => e.start!.millisecondsSinceEpoch == target.start!.millisecondsSinceEpoch), false);
+
+        final overlapCheck = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: targetStart.subtract(const Duration(hours: 1)),
+          endDate: targetEnd.add(const Duration(hours: 1)),
+          eventId: overlapId,
+        );
+        expect(overlapCheck.isNotEmpty, true);
+
+        await safeDeleteEvent(calendarIdA, recId);
+        await safeDeleteEvent(calendarIdA, overlapId);
+        print('LOG_TEST: Delete single instance with overlapping event verified');
+      });
+
+      test('7.5 Delete detached occurrence (previously edited single instance)', () async {
+        final start = baseStart.add(const Duration(days: 40));
+        final recEvent = Event(calendarIdA)
+          ..title = 'Recurring For Detach Test'
+          ..start = start
+          ..end = start.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+        final recRes = await deviceCalendarPlugin.createOrUpdateEvent(recEvent);
+        expect(recRes?.isSuccess, true);
+        final recId = recRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final initialEvents = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: start.subtract(const Duration(days: 1)),
+          endDate: start.add(const Duration(days: 10)),
+          eventId: recId,
+        );
+        initialEvents.sort((a, b) => a.start!.compareTo(b.start!));
+        final targetToDetach = initialEvents[2];
+
+        final origStartMs = targetToDetach.start!.millisecondsSinceEpoch;
+        final origEndMs = targetToDetach.end!.millisecondsSinceEpoch;
+        targetToDetach.title = 'Detached Occurrence (Edited)';
+        final editRes = await deviceCalendarPlugin.createOrUpdateEvent(
+          targetToDetach,
+          instanceStartDate: origStartMs,
+          instanceEndDate: origEndMs,
+          updateFollowingInstances: false,
+        );
+        expect(editRes?.isSuccess, true);
+
+        await Future.delayed(const Duration(seconds: 2));
+        final detachedList = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: start.subtract(const Duration(days: 1)),
+          endDate: start.add(const Duration(days: 10)),
+        );
+        final detachedTarget = detachedList.firstWhere((e) => e.start!.millisecondsSinceEpoch == origStartMs);
+
+        final delRes = await deviceCalendarPlugin.deleteEventInstance(
+          calendarIdA,
+          detachedTarget.eventId ?? recId,
+          origStartMs,
+          origEndMs,
+          false,
+        );
+        expect(delRes.isSuccess, true);
+        expect(delRes.data, true);
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await loadInstancesFromDevice(
+          calendarIdA,
+          startDate: start.subtract(const Duration(days: 1)),
+          endDate: start.add(const Duration(days: 10)),
+          eventId: recId,
+        );
+        expect(after.any((e) => e.start!.millisecondsSinceEpoch == origStartMs), false);
+
+        await safeDeleteEvent(calendarIdA, recId);
+        print('LOG_TEST: Delete detached occurrence verified');
+      });
     });
 
     // =========================================================================

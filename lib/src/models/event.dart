@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:collection/collection.dart';
 
 import '../../device_calendar.dart';
@@ -133,8 +135,8 @@ class Event {
         ? TZDateTime.fromMillisecondsSinceEpoch(endLocation, endTimestamp)
         : TZDateTime.now(local);
     allDay = json['eventAllDay'] ?? false;
-    if (allDay ?? false) {
-      // The datetime in an allDay event is adjusted to local
+    if (Platform.isAndroid && (allDay ?? false)) {
+      // On Android, the datetime in an allDay event is adjusted to local
       // timezone, which can result in the wrong day, so we need to bring the
       // date back to midnight UTC to get the correct date
       var startOffset = start?.timeZoneOffset.inMilliseconds ?? 0;

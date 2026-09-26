@@ -227,14 +227,14 @@ class DeviceCalendarPlugin {
           if (event.end != null) {
             var dateEnd = DateTime(
                 event.end!.year, event.end!.month, event.end!.day, 0, 0, 0);
-            // allDay events need to be at midnight UTC on the
+            // allDay events on Android need to be at midnight UTC on the
             // day after the last day. For example, a 2-day allDay event on
             // Jan 1 and 2, should be from Jan 1 00:00:00 to Jan 3 00:00:00
             event.end = Platform.isAndroid
                 ? TZDateTime.utc(event.end!.year, event.end!.month,
                         event.end!.day, 0, 0, 0)
                     .add(const Duration(days: 1))
-                : TZDateTime.from(dateEnd.add(const Duration(days: 1)),
+                : TZDateTime.from(dateEnd,
                     timeZoneDatabase.locations[event.end!.location.name]!);
           }
         }
@@ -455,12 +455,10 @@ class DeviceCalendarPlugin {
       } else {
         result.data = rawData;
       }
-    } catch (e, s) {
+    } catch (e) {
       if (e is ArgumentError) {
         debugPrint(
             "INVOKE_CHANNEL_METHOD_ERROR! Name: ${e.name}, InvalidValue: ${e.invalidValue}, Message: ${e.message}, ${e.toString()}");
-      } else if (e is PlatformException) {
-        debugPrint('INVOKE_CHANNEL_METHOD_ERROR: $e\n$s');
       } else {
         _parsePlatformExceptionAndUpdateResult<T>(e as Exception?, result);
       }
@@ -480,8 +478,6 @@ class DeviceCalendarPlugin {
       );
       return;
     }
-
-    debugPrint('$exception');
 
     if (exception is PlatformException) {
       result.errors.add(

@@ -939,28 +939,83 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
         instanceStartDate: Date,
         instanceEndDate: Date
     ) -> EKEvent? {
-        let sourceEvent = eventStore.event(withIdentifier: eventId)
-        let searchEnd = max(instanceEndDate, instanceStartDate).addingTimeInterval(1)
-        let searchStart = instanceStartDate.addingTimeInterval(-1)
-        let searchCalendars: [EKCalendar]? = sourceEvent?.calendar != nil ? [sourceEvent!.calendar] : nil
+        let baseEventId = eventId.components(separatedBy: "/").first ?? eventId
+        let sourceEvent = eventStore.event(withIdentifier: eventId) ?? eventStore.event(withIdentifier: baseEventId)
+        let searchEnd = max(instanceEndDate, instanceStartDate.addingTimeInterval(60)).addingTimeInterval(5)
+        let searchStart = instanceStartDate.addingTimeInterval(-5)
+        let searchCalendars: [EKCalendar]? = [sourceEvent?.calendar ?? calendar]
         let predicate = eventStore.predicateForEvents(
             withStart: searchStart,
             end: searchEnd,
             calendars: searchCalendars
         )
 
-        return eventStore.events(matching: predicate).first { candidate in
+        let candidates = eventStore.events(matching: predicate)
+        if let match = candidates.first(where: { candidate in
             guard let occurrenceStart = candidate.occurrenceDate ?? candidate.startDate else {
                 return false
             }
             let matchesRequestedOccurrence =
-                abs(occurrenceStart.timeIntervalSince(instanceStartDate)) < 1
+                abs(occurrenceStart.timeIntervalSince(instanceStartDate)) < 60
+            let candidateBaseId = candidate.eventIdentifier.components(separatedBy: "/").first ?? candidate.eventIdentifier
             let matchesSeries =
                 candidate.eventIdentifier == eventId ||
-                (sourceEvent?.calendarItemIdentifier != nil &&
-                    candidate.calendarItemIdentifier == sourceEvent?.calendarItemIdentifier)
-            return matchesRequestedOccurrence && matchesSeries
+                candidateBaseId == baseEventId ||
+                candidate.calendarItemIdentifier == eventId ||
+                candidate.calendarItemExternalIdentifier == eventId ||
+                (sourceEvent != nil && (
+                    candidate.calendarItemIdentifier == sourceEvent?.calendarItemIdentifier ||
+                    candidate.calendarItemExternalIdentifier == sourceEvent?.calendarItemExternalIdentifier ||
+                    candidate.eventIdentifier == sourceEvent?.eventIdentifier ||
+                    candidateBaseId == (sourceEvent?.eventIdentifier.components(separatedBy: "/").first ?? sourceEvent?.eventIdentifier)
+                ))
+            return matchesRequestedOccurrence && matchesSeries && (candidate.hasRecurrenceRules || candidate.isDetached || sourceEvent?.hasRecurrenceRules == true)
+        }) {
+            return match
         }
+
+        // Second pass: without requiring hasRecurrenceRules in case candidate hasn't expanded rules yet
+        if let match = candidates.first(where: { candidate in
+            guard let occurrenceStart = candidate.occurrenceDate ?? candidate.startDate else {
+                return false
+            }
+            let matchesRequestedOccurrence =
+                abs(occurrenceStart.timeIntervalSince(instanceStartDate)) < 60
+            let candidateBaseId = candidate.eventIdentifier.components(separatedBy: "/").first ?? candidate.eventIdentifier
+            let matchesSeries =
+                candidate.eventIdentifier == eventId ||
+                candidateBaseId == baseEventId ||
+                candidate.calendarItemIdentifier == eventId ||
+                candidate.calendarItemExternalIdentifier == eventId ||
+                (sourceEvent != nil && (
+                    candidate.calendarItemIdentifier == sourceEvent?.calendarItemIdentifier ||
+                    candidate.calendarItemExternalIdentifier == sourceEvent?.calendarItemExternalIdentifier ||
+                    candidate.eventIdentifier == sourceEvent?.eventIdentifier ||
+                    candidateBaseId == (sourceEvent?.eventIdentifier.components(separatedBy: "/").first ?? sourceEvent?.eventIdentifier)
+                ))
+            return matchesRequestedOccurrence && matchesSeries
+        }) {
+            return match
+        }
+
+        // Fallback: If sourceEvent exists but occurrence IDs did not directly match
+        let matchingTimeCandidates = candidates.filter { candidate in
+            guard let occurrenceStart = candidate.occurrenceDate ?? candidate.startDate else {
+                return false
+            }
+            return abs(occurrenceStart.timeIntervalSince(instanceStartDate)) < 60
+        }
+        if let sourceEvent = sourceEvent {
+            if matchingTimeCandidates.count == 1 {
+                return matchingTimeCandidates.first
+            }
+            if let sourceTitle = sourceEvent.title {
+                if let titleMatch = matchingTimeCandidates.first(where: { $0.title == sourceTitle }) {
+                    return titleMatch
+                }
+            }
+        }
+        return nil
     }
 
     private func applyEventArguments(
@@ -1125,25 +1180,32 @@ public class DeviceCalendarPlugin: NSObject, FlutterPlugin {
                 }
             }
             else {
-                let startDate = Date (timeIntervalSince1970: startDateNumber!.doubleValue / 1000.0)
-                let endDate = Date (timeIntervalSince1970: endDateNumber!.doubleValue / 1000.0)
-
-                let predicate = self.eventStore.predicateForEvents(withStart: startDate, end: endDate, calendars: nil)
-                let foundEkEvents = self.eventStore.events(matching: predicate) as [EKEvent]?
-
-                if foundEkEvents == nil || foundEkEvents?.count == 0 {
+                guard let startDateNumber = startDateNumber,
+                      let endDateNumber = endDateNumber,
+                      let followingInstances = followingInstances else {
                     self.finishWithEventNotFoundError(result: result, eventId: eventId)
                     return
                 }
 
-                let ekEvent = foundEkEvents!.first(where: {$0.eventIdentifier == eventId})
+                let startDate = Date(timeIntervalSince1970: startDateNumber.doubleValue / 1000.0)
+                let endDate = Date(timeIntervalSince1970: endDateNumber.doubleValue / 1000.0)
+
+                guard let ekEvent = self.recurringInstance(
+                    eventId: eventId,
+                    calendar: ekCalendar!,
+                    instanceStartDate: startDate,
+                    instanceEndDate: endDate
+                ) else {
+                    self.finishWithEventNotFoundError(result: result, eventId: eventId)
+                    return
+                }
 
                 do {
-                    if (!followingInstances!) {
-                        try self.eventStore.remove(ekEvent!, span: .thisEvent, commit: true)
+                    if (!followingInstances) {
+                        try self.eventStore.remove(ekEvent, span: .thisEvent, commit: true)
                     }
                     else {
-                        try self.eventStore.remove(ekEvent!, span: .futureEvents, commit: true)
+                        try self.eventStore.remove(ekEvent, span: .futureEvents, commit: true)
                     }
 
                     result(true)

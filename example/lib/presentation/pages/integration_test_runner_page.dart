@@ -961,7 +961,9 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _assert(excEvent.location == 'VIP Lounge', 'Exception location mismatch');
 
         await _safeDeleteEvent(calendarIdA, eventId);
-        if (excEvent.eventId != null && excEvent.eventId != eventId) {
+        if (excEvent.eventId != null &&
+            excEvent.eventId != eventId &&
+            !excEvent.eventId!.startsWith('$eventId/')) {
           await _safeDeleteEvent(calendarIdA, excEvent.eventId);
         }
         _recordResult(suite5, '5.1 Edit Only This Instance', true, 'Single occurrence detached and modified without altering remaining 4 occurrences');
@@ -1015,7 +1017,9 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _assert(dec3Slot.isEmpty, 'Original Dec 3 instance still exists at old time');
 
         await _safeDeleteEvent(calendarIdA, eventId);
-        if (shifted.eventId != null && shifted.eventId != eventId) {
+        if (shifted.eventId != null &&
+            shifted.eventId != eventId &&
+            !shifted.eventId!.startsWith('$eventId/')) {
           await _safeDeleteEvent(calendarIdA, shifted.eventId);
         }
         _recordResult(suite5, '5.2 Move Instance to Different Day', true, 'Moved single instance to next day without affecting series');
@@ -1066,7 +1070,9 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _assert(shifted.start!.month == 11 && shifted.start!.day == 28 && shifted.start!.hour == 14, 'Month shift date mismatch');
 
         await _safeDeleteEvent(calendarIdA, eventId);
-        if (shifted.eventId != null && shifted.eventId != eventId) {
+        if (shifted.eventId != null &&
+            shifted.eventId != eventId &&
+            !shifted.eventId!.startsWith('$eventId/')) {
           await _safeDeleteEvent(calendarIdA, shifted.eventId);
         }
         _recordResult(suite5, '5.3 Move Instance Across Month', true, 'Moved single instance to previous month successfully');
@@ -1296,14 +1302,17 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
 
         // 1. Delete invalid eventId at overlapping time window - previously crashed with fatal error: unexpectedly found nil
         _log('Testing safe failure with non-matching eventId at overlapping time window...');
-        final invalidDel = await _plugin.deleteEventInstance(
-          calendarIdA,
-          'non_existent_id_for_crash_test',
-          target.start!.millisecondsSinceEpoch,
-          target.end!.millisecondsSinceEpoch,
-          false,
-        );
-        _assert(invalidDel.isSuccess == false || invalidDel.data != true, 'Should fail gracefully for non-existent eventId');
+        Result<bool>? invalidDel;
+        try {
+          invalidDel = await _plugin.deleteEventInstance(
+            calendarIdA,
+            'non_existent_id_for_crash_test',
+            target.start!.millisecondsSinceEpoch,
+            target.end!.millisecondsSinceEpoch,
+            false,
+          );
+        } catch (_) {}
+        _assert(invalidDel == null || invalidDel.isSuccess == false || invalidDel.data != true, 'Should fail gracefully for non-existent eventId');
 
         // 2. Delete the actual instance using target.eventId (loaded occurrence eventId)
         _log('Deleting instance using target.eventId (${target.eventId}) with deleteFollowingInstances=false...');

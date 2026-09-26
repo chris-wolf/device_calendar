@@ -203,5 +203,138 @@ void main() {
 
       print('LOG_REPRO: [Test 3] Passed');
     });
+
+    test('4. Delete Single Instance with Concurrent Overlapping Event & Occurrence ID (Crash Regression)', () async {
+      final localLocation = tz.local;
+      final now = tz.TZDateTime.now(localLocation);
+      final eventStart = tz.TZDateTime(localLocation, now.year, now.month, now.day, 10, 0, 0).add(const Duration(days: 30));
+
+      final eventId = await createDailyRecurringEvent(eventStart, 5);
+
+      // Create an overlapping standalone event at the exact same time as instance 3
+      final targetTime = eventStart.add(const Duration(days: 2));
+      final overlap = Event(calendarId)
+        ..title = 'Concurrent Overlapping Event'
+        ..start = targetTime
+        ..end = targetTime.add(const Duration(hours: 1));
+      final overlapRes = await deviceCalendarPlugin.createOrUpdateEvent(overlap);
+      expect(overlapRes?.isSuccess, true);
+      final overlapId = overlapRes!.data!;
+
+      final retrieveParams = RetrieveEventsParams(
+        startDate: eventStart.subtract(const Duration(days: 1)),
+        endDate: eventStart.add(const Duration(days: 7)),
+      );
+
+      final initialEventsResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(initialEventsResult.isSuccess, true);
+      final initialEvents = initialEventsResult.data!.where((e) => e.eventId == eventId).toList();
+      expect(initialEvents.length, 5);
+
+      initialEvents.sort((a, b) => a.start!.compareTo(b.start!));
+      final targetInstance = initialEvents[2];
+      final targetStart = targetInstance.start!.millisecondsSinceEpoch;
+      final targetEnd = targetInstance.end!.millisecondsSinceEpoch;
+
+      // 1. Safe failure: Non-matching ID during overlapping window must fail gracefully without nil force-unwrap crash
+      Result<bool>? invalidDel;
+      try {
+        invalidDel = await deviceCalendarPlugin.deleteEventInstance(
+          calendarId,
+          'non_existent_id_for_crash_test',
+          targetStart,
+          targetEnd,
+          false,
+        );
+      } catch (_) {}
+      expect(invalidDel == null || invalidDel.isSuccess == false || invalidDel.data != true, true);
+
+      // 2. Delete using targetInstance.eventId (loaded occurrence ID)
+      final deleteResult = await deviceCalendarPlugin.deleteEventInstance(
+        calendarId,
+        targetInstance.eventId ?? eventId,
+        targetStart,
+        targetEnd,
+        false,
+      );
+      expect(deleteResult.isSuccess, true);
+      expect(deleteResult.data, true);
+
+      await Future.delayed(const Duration(seconds: 2));
+
+      final afterDeleteResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(afterDeleteResult.isSuccess, true);
+      final afterDeleteEvents = afterDeleteResult.data!.where((e) => e.eventId == eventId).toList();
+      expect(afterDeleteEvents.length, 4);
+      expect(afterDeleteEvents.any((e) => e.start!.millisecondsSinceEpoch == targetStart), false);
+
+      // Verify the overlapping event was untouched
+      final overlapCheck = await deviceCalendarPlugin.retrieveEvents(calendarId, RetrieveEventsParams(
+        startDate: targetTime.subtract(const Duration(hours: 1)),
+        endDate: targetTime.add(const Duration(hours: 2)),
+        eventIds: [overlapId],
+      ));
+      expect(overlapCheck.data?.isNotEmpty, true);
+
+      await deviceCalendarPlugin.deleteEvent(calendarId, overlapId);
+      print('LOG_REPRO: [Test 4] Passed');
+    });
+
+    test('5. Delete Detached Occurrence (Crash Regression)', () async {
+      final localLocation = tz.local;
+      final now = tz.TZDateTime.now(localLocation);
+      final eventStart = tz.TZDateTime(localLocation, now.year, now.month, now.day, 10, 0, 0).add(const Duration(days: 40));
+
+      final eventId = await createDailyRecurringEvent(eventStart, 5);
+
+      final retrieveParams = RetrieveEventsParams(
+        startDate: eventStart.subtract(const Duration(days: 1)),
+        endDate: eventStart.add(const Duration(days: 7)),
+      );
+
+      final initialEventsResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      expect(initialEventsResult.isSuccess, true);
+      final initialEvents = initialEventsResult.data!.where((e) => e.eventId == eventId).toList();
+      expect(initialEvents.length, 5);
+
+      initialEvents.sort((a, b) => a.start!.compareTo(b.start!));
+      final targetInstance = initialEvents[2];
+      final targetStart = targetInstance.start!.millisecondsSinceEpoch;
+      final targetEnd = targetInstance.end!.millisecondsSinceEpoch;
+
+      // Edit only this instance (detached occurrence)
+      targetInstance.title = 'Detached Occurrence (Edited)';
+      final editRes = await deviceCalendarPlugin.createOrUpdateEvent(
+        targetInstance,
+        instanceStartDate: targetStart,
+        instanceEndDate: targetEnd,
+        updateFollowingInstances: false,
+      );
+      expect(editRes?.isSuccess, true);
+
+      await Future.delayed(const Duration(seconds: 2));
+
+      final afterEditResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      final detachedInstance = afterEditResult.data!.firstWhere((e) => e.start!.millisecondsSinceEpoch == targetStart);
+
+      // Delete the detached occurrence
+      final deleteResult = await deviceCalendarPlugin.deleteEventInstance(
+        calendarId,
+        detachedInstance.eventId ?? eventId,
+        targetStart,
+        targetEnd,
+        false,
+      );
+      expect(deleteResult.isSuccess, true);
+      expect(deleteResult.data, true);
+
+      await Future.delayed(const Duration(seconds: 2));
+
+      final afterDeleteResult = await deviceCalendarPlugin.retrieveEvents(calendarId, retrieveParams);
+      final afterDeleteEvents = afterDeleteResult.data!.where((e) => e.eventId == eventId).toList();
+      expect(afterDeleteEvents.any((e) => e.start!.millisecondsSinceEpoch == targetStart), false);
+
+      print('LOG_REPRO: [Test 5] Passed');
+    });
   });
 }
