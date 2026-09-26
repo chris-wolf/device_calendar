@@ -1266,6 +1266,127 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
         _recordResult(suite7, '7.3 Delete All & Neighbor Safety', false, 'Delete all failed', e.toString());
       }
 
+      // 7.4 Delete single instance with concurrent overlapping event & occurrence eventId (Crash Regression Test)
+      setState(() => _currentStepName = '7.4 Testing Delete Instance with Overlapping Event (Crash Regression)...');
+      _log('Step 7.4: Testing "Delete Only This Instance" with overlapping event and occurrence eventId...');
+      try {
+        final start = delStart.add(const Duration(days: 30));
+        final event = Event(calendarIdA)
+          ..title = 'Delete Recurring Overlap'
+          ..start = start
+          ..end = start.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+        final res = await _plugin.createOrUpdateEvent(event);
+        final recId = res!.data!;
+
+        // Create an overlapping standalone event at the exact same time as instance 3
+        final targetStart = start.add(const Duration(days: 2));
+        final targetEnd = targetStart.add(const Duration(hours: 1));
+        final overlap = Event(calendarIdA)
+          ..title = 'Concurrent Overlapping Event'
+          ..start = targetStart
+          ..end = targetEnd;
+        final overlapRes = await _plugin.createOrUpdateEvent(overlap);
+        final overlapId = overlapRes!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final list = await _loadInstances(calendarIdA, startDate: start.subtract(const Duration(days: 1)), endDate: start.add(const Duration(days: 10)), eventId: recId);
+        list.sort((a, b) => a.start!.compareTo(b.start!));
+        final target = list[2];
+
+        // 1. Delete invalid eventId at overlapping time window - previously crashed with fatal error: unexpectedly found nil
+        _log('Testing safe failure with non-matching eventId at overlapping time window...');
+        final invalidDel = await _plugin.deleteEventInstance(
+          calendarIdA,
+          'non_existent_id_for_crash_test',
+          target.start!.millisecondsSinceEpoch,
+          target.end!.millisecondsSinceEpoch,
+          false,
+        );
+        _assert(invalidDel.isSuccess == false || invalidDel.data != true, 'Should fail gracefully for non-existent eventId');
+
+        // 2. Delete the actual instance using target.eventId (loaded occurrence eventId)
+        _log('Deleting instance using target.eventId (${target.eventId}) with deleteFollowingInstances=false...');
+        final delRes = await _plugin.deleteEventInstance(
+          calendarIdA,
+          target.eventId ?? recId,
+          target.start!.millisecondsSinceEpoch,
+          target.end!.millisecondsSinceEpoch,
+          false,
+        );
+        _assert(delRes.isSuccess && delRes.data == true, 'Delete instance with overlapping event failed');
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await _loadInstances(calendarIdA, startDate: start.subtract(const Duration(days: 1)), endDate: start.add(const Duration(days: 10)), eventId: recId);
+        _assert(after.length == 4, 'Expected 4 remaining instances after deleting 1');
+        _assert(!after.any((e) => e.start!.millisecondsSinceEpoch == target.start!.millisecondsSinceEpoch), 'Deleted instance still exists');
+
+        // Verify the overlapping event was untouched
+        final overlapCheck = await _loadInstances(calendarIdA, startDate: targetStart.subtract(const Duration(hours: 1)), endDate: targetEnd.add(const Duration(hours: 1)), eventId: overlapId);
+        _assert(overlapCheck.isNotEmpty, 'Overlapping event was deleted!');
+
+        await _safeDeleteEvent(calendarIdA, recId);
+        await _safeDeleteEvent(calendarIdA, overlapId);
+        _recordResult(suite7, '7.4 Delete Instance with Overlapping Event', true, 'Deleted single instance cleanly without crash when overlapping event exists');
+      } catch (e) {
+        _recordResult(suite7, '7.4 Delete Instance with Overlapping Event', false, 'Delete instance with overlapping event failed', e.toString());
+      }
+
+      // 7.5 Delete detached occurrence (previously edited single instance)
+      setState(() => _currentStepName = '7.5 Testing Delete Detached Occurrence...');
+      _log('Step 7.5: Testing deleting a detached/edited occurrence with deleteFollowingInstances=false...');
+      try {
+        final start = delStart.add(const Duration(days: 40));
+        final event = Event(calendarIdA)
+          ..title = 'Recurring For Detach Test'
+          ..start = start
+          ..end = start.add(const Duration(hours: 1))
+          ..recurrenceRule = RecurrenceRule(frequency: Frequency.daily, count: 5);
+        final res = await _plugin.createOrUpdateEvent(event);
+        final recId = res!.data!;
+
+        await Future.delayed(const Duration(seconds: 1));
+        final list = await _loadInstances(calendarIdA, startDate: start.subtract(const Duration(days: 1)), endDate: start.add(const Duration(days: 10)), eventId: recId);
+        list.sort((a, b) => a.start!.compareTo(b.start!));
+        final targetToDetach = list[2];
+
+        // Edit only this instance (detached occurrence)
+        final origStartMs = targetToDetach.start!.millisecondsSinceEpoch;
+        final origEndMs = targetToDetach.end!.millisecondsSinceEpoch;
+        targetToDetach.title = 'Detached Occurrence (Edited)';
+        final editRes = await _plugin.createOrUpdateEvent(
+          targetToDetach,
+          instanceStartDate: origStartMs,
+          instanceEndDate: origEndMs,
+          updateFollowingInstances: false,
+        );
+        _assert(editRes?.isSuccess == true, 'Failed to create detached occurrence');
+
+        await Future.delayed(const Duration(seconds: 2));
+        final detachedList = await _loadInstances(calendarIdA, startDate: start.subtract(const Duration(days: 1)), endDate: start.add(const Duration(days: 10)));
+        final detachedTarget = detachedList.firstWhere((e) => e.start!.millisecondsSinceEpoch == origStartMs);
+
+        // Delete the detached occurrence
+        _log('Deleting detached occurrence with deleteFollowingInstances=false...');
+        final delRes = await _plugin.deleteEventInstance(
+          calendarIdA,
+          detachedTarget.eventId ?? recId,
+          origStartMs,
+          origEndMs,
+          false,
+        );
+        _assert(delRes.isSuccess && delRes.data == true, 'Delete detached instance failed');
+
+        await Future.delayed(const Duration(seconds: 2));
+        final after = await _loadInstances(calendarIdA, startDate: start.subtract(const Duration(days: 1)), endDate: start.add(const Duration(days: 10)), eventId: recId);
+        _assert(!after.any((e) => e.start!.millisecondsSinceEpoch == origStartMs), 'Deleted detached instance still exists');
+
+        await _safeDeleteEvent(calendarIdA, recId);
+        _recordResult(suite7, '7.5 Delete Detached Occurrence', true, 'Deleted detached occurrence cleanly without crash');
+      } catch (e) {
+        _recordResult(suite7, '7.5 Delete Detached Occurrence', false, 'Delete detached occurrence failed', e.toString());
+      }
+
       // =======================================================================
       // SUITE 8: FINAL VERIFICATION & CALENDAR DELETION
       // =======================================================================
