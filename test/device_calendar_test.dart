@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:device_calendar/device_calendar.dart';
 import 'package:device_calendar/src/common/error_codes.dart';
 import 'package:flutter/services.dart';
@@ -269,5 +271,27 @@ void main() {
     expect(newEvent.status, equals(event.status));
     expect(newEvent.color, equals(event.color));
     expect(newEvent.colorKey, equals(event.colorKey));
+  });
+
+  test('Event_AllDay_Serializes_Correctly', () {
+    final event = Event(
+      'cal123',
+      eventId: 'evt123',
+      title: 'All Day Test Event',
+      start: TZDateTime(local, 2027, 1, 10, 0, 0, 0),
+      end: TZDateTime(local, 2027, 1, 10, 23, 59, 59),
+      allDay: true,
+    );
+
+    final stringEvent = event.toJson();
+    expect(stringEvent, isNotNull);
+    final newEvent = Event.fromJson(stringEvent);
+    expect(newEvent, isNotNull);
+    expect(newEvent.allDay, isTrue);
+    if (!Platform.isAndroid) {
+      expect(newEvent.start!.day, equals(10));
+      expect(newEvent.start!.month, equals(1));
+      expect(newEvent.start!.year, equals(2027));
+    }
   });
 }
