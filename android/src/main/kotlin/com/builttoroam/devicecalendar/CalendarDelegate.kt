@@ -416,6 +416,7 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
             }
             val eventsSortOrder = Events.DTSTART + " DESC"
 
+            val contentResolver: ContentResolver? = _context?.contentResolver
             val eventsCursor = contentResolver?.query(
                 eventsUri,
                 Cst.EVENT_PROJECTION,
@@ -437,8 +438,8 @@ class CalendarDelegate(binding: ActivityPluginBinding?, context: Context) :
                     val event = parseEvent(calendarId, eventsCursor) ?: continue
                     events.add(event)
                 }
-                val attendeesCache = mutableMapOf<String, List<Attendee>>()
-                val remindersCache = mutableMapOf<String, List<Reminder>>()
+                val attendeesCache = mutableMapOf<String, MutableList<Attendee>>()
+                val remindersCache = mutableMapOf<String, MutableList<Reminder>>()
                 for (event in events) {
                     val eventId = event.eventId
                     if (eventId != null) {
