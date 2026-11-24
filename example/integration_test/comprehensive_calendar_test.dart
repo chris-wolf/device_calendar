@@ -116,7 +116,7 @@ void main() {
     Future<Event?> loadEventFromDevice(String? calId, String? eventId) async {
       final now = tz.TZDateTime.now(tz.local);
       final retrieveParams = RetrieveEventsParams(
-        startDate: now.subtract(const Duration(days: 60)),
+        startDate: now.subtract(const Duration(days: 365)),
         endDate: now.add(const Duration(days: 365)),
         eventIds: eventId != null ? [eventId] : null,
       );

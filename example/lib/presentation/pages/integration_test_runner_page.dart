@@ -148,7 +148,7 @@ class _IntegrationTestRunnerPageState extends State<IntegrationTestRunnerPage> {
   Future<Event?> _loadEvent(String? calId, String? eventId) async {
     final now = tz.TZDateTime.now(tz.local);
     final params = RetrieveEventsParams(
-      startDate: now.subtract(const Duration(days: 60)),
+      startDate: now.subtract(const Duration(days: 365)),
       endDate: now.add(const Duration(days: 365)),
       eventIds: eventId != null ? [eventId] : null,
     );
